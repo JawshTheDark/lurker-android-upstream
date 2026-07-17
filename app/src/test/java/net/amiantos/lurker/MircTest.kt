@@ -82,4 +82,21 @@ class MircTest {
     fun ignoresNonHttpText() {
         assertEquals(0, Mirc.findUrls("no links here, ftp://nope").size)
     }
+
+    @Test
+    fun wholeMessageBgWhenFullyPainted() {
+        // \u000300,04 = white on red for the entire message.
+        assertEquals(Mirc.color(4), Mirc.wholeMessageBg("\u000300,04alert alert alert"))
+    }
+
+    @Test
+    fun wholeMessageBgIgnoresPartialHighlights() {
+        // Only one word carries a background — that's an inline highlight.
+        assertEquals(null, Mirc.wholeMessageBg("normal text \u000300,04hot\u0003 more normal text here"))
+    }
+
+    @Test
+    fun wholeMessageBgNullWithoutCodes() {
+        assertEquals(null, Mirc.wholeMessageBg("just plain text"))
+    }
 }

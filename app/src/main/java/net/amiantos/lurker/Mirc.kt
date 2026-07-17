@@ -217,6 +217,27 @@ object Mirc {
             m.range.first..end
         }.toList()
 
+    /**
+     * If one mIRC background color paints (nearly) the whole message, return it
+     * so the bubble itself can take that color — a fully-highlighted line reads
+     * as a colored bubble, not as colored stripes floating in a gray one.
+     * Partial highlights (< 85% coverage) return null and stay inline.
+     */
+    fun wholeMessageBg(input: String): Int? {
+        val spans = parse(input)
+        var total = 0
+        val coverage = HashMap<Int, Int>()
+        for (span in spans) {
+            val visible = span.text.count { !it.isWhitespace() }
+            if (visible == 0) continue
+            total += visible
+            span.bg?.let { coverage[it] = (coverage[it] ?: 0) + visible }
+        }
+        if (total == 0) return null
+        val (bg, covered) = coverage.maxByOrNull { it.value } ?: return null
+        return if (covered * 100 >= total * 85) bg else null
+    }
+
     /** Strip all control codes without styling — used for notifications/previews. */
     fun strip(input: String): String = buildString {
         parse(input).forEach { append(it.text) }

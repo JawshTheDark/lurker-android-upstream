@@ -1061,9 +1061,12 @@ private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean, baseSize: Int
                 modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
             )
         }
+        // A message fully painted with one mIRC background becomes a bubble of
+        // that color instead of colored stripes inside a gray bubble.
+        val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
         Box(
             Modifier
-                .background(if (self) AccentBlue else SurfaceRaised, shape)
+                .background(paintedBg ?: if (self) AccentBlue else SurfaceRaised, shape)
                 .padding(horizontal = 13.dp, vertical = 7.dp),
         ) {
             val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue)
