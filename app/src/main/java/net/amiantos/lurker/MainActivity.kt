@@ -109,6 +109,24 @@ import net.amiantos.lurker.ui.theme.SurfaceRaised
 import net.amiantos.lurker.ui.theme.TextSecondary
 import net.amiantos.lurker.ui.theme.formatTime
 import net.amiantos.lurker.ui.theme.nickColor
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+
+/** The frosted-pane recipe every glass surface shares. */
+@Composable
+private fun glassStyle(): HazeStyle = HazeStyle(
+    backgroundColor = CanvasBlack,
+    tints = listOf(HazeTint(SurfaceDark.copy(alpha = 0.55f))),
+    blurRadius = 22.dp,
+    noiseFactor = 0.02f,
+)
 
 /** Where the app is: the buffer list, a chat, settings, DCC, or networks. */
 private sealed interface Screen {
@@ -288,12 +306,42 @@ private fun BufferListScreen(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = CanvasBlack,
-        topBar = {
+    val hazeState = remember { HazeState() }
+    val density = LocalDensity.current
+    var topBarHeightPx by remember { mutableStateOf(0) }
+
+    Box(Modifier.fillMaxSize().background(CanvasBlack)) {
+        val rows = remember(
+            client.buffers.toList(),
+            client.unread.toMap(),
+            client.networks.toMap(),
+        ) { buildBufferSections(client) }
+
+        if (rows.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (client.connected) "No buffers yet." else "Connecting…", color = TextSecondary)
+            }
+        } else {
+            BufferListBody(
+                client = client,
+                rows = rows,
+                sharePending = sharePending,
+                topPadding = with(density) { topBarHeightPx.toDp() },
+                hazeState = hazeState,
+                onOpen = onOpen,
+            )
+        }
+
+        // Frosted top bar the list scrolls beneath.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .onSizeChanged { topBarHeightPx = it.height }
+                .hazeEffect(hazeState, style = glassStyle()),
+        ) {
             CenterAlignedTopAppBar(
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ConnectionDot(client.connected)
@@ -316,22 +364,23 @@ private fun BufferListScreen(
                     }
                 },
             )
-        },
-    ) { padding ->
-        val rows = remember(
-            client.buffers.toList(),
-            client.unread.toMap(),
-            client.networks.toMap(),
-        ) { buildBufferSections(client) }
-
-        if (rows.isEmpty()) {
-            Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(if (client.connected) "No buffers yet." else "Connecting…", color = TextSecondary)
-            }
-            return@Scaffold
         }
+    }
+}
 
-        LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+@Composable
+private fun BufferListBody(
+    client: LurkerClient,
+    rows: List<BufferSection>,
+    sharePending: Boolean,
+    topPadding: androidx.compose.ui.unit.Dp,
+    hazeState: HazeState,
+    onOpen: (Buffer) -> Unit,
+) {
+    LazyColumn(
+        Modifier.fillMaxSize().hazeSource(hazeState),
+        contentPadding = PaddingValues(top = topPadding + 4.dp),
+    ) {
             if (sharePending) {
                 item {
                     Text(
@@ -382,7 +431,6 @@ private fun BufferListScreen(
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
-    }
 }
 
 private data class BufferSection(val network: String, val buffers: List<Buffer>)
@@ -592,12 +640,61 @@ private fun ChatScreen(
         }
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = CanvasBlack,
-        topBar = {
+    // Real glassmorphism: the message list is the haze SOURCE and scrolls
+    // edge-to-edge; the top bar and composer are frosted panes that blur
+    // whatever passes beneath them.
+    val hazeState = remember { HazeState() }
+    val density = LocalDensity.current
+    var topBarHeightPx by remember { mutableStateOf(0) }
+    var bottomBarHeightPx by remember { mutableStateOf(0) }
+
+    Box(Modifier.fillMaxSize().background(CanvasBlack)) {
+        // Chat text follows the synced look.font.size.mobile setting (web px
+        // ~ sp); +2 keeps the historical default (14 -> 16sp).
+        val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().hazeSource(hazeState),
+            contentPadding = PaddingValues(
+                top = with(density) { topBarHeightPx.toDp() } + 4.dp,
+                bottom = with(density) { bottomBarHeightPx.toDp() } + 6.dp,
+            ),
+        ) {
+            if (showLoadOlder) {
+                item {
+                    TextButton(
+                        onClick = { anchorId = oldestId; client.loadOlder(buffer) },
+                        enabled = !loadingOlder,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            if (loadingOlder) "Loading…" else "Load older messages",
+                            color = if (loadingOlder) TextSecondary else AccentBlue,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+            }
+            items(rows.size) { i ->
+                when (val row = rows[i]) {
+                    is ChatRow.Bubble -> MessageBubble(row.msg, baseSize)
+                    is ChatRow.Action -> ActionLine(row.msg, baseSize)
+                    is ChatRow.SystemLine -> SystemLine(row.msg)
+                    ChatRow.NewMessages -> NewMessagesDivider()
+                }
+            }
+        }
+
+        // Frosted top bar.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .onSizeChanged { topBarHeightPx = it.height }
+                .hazeEffect(hazeState, style = glassStyle()),
+        ) {
             CenterAlignedTopAppBar(
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
                 },
@@ -606,6 +703,7 @@ private fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .background(SurfaceDark, RoundedCornerShape(18.dp))
+                            .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
                             .clickable(onClick = onBack)
                             .padding(horizontal = 14.dp, vertical = 6.dp),
                     ) {
@@ -629,43 +727,19 @@ private fun ChatScreen(
                     }
                 },
             )
-        },
-    ) { padding ->
-        // consumeWindowInsets stops imePadding from re-adding the bottom system
-        // inset the Scaffold padding already applied — without it the composer
-        // floats a navigation-bar-height above the keyboard.
-        Column(Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize().imePadding()) {
-            // Chat text follows the synced look.font.size.mobile setting (web px
-            // ~ sp); +2 keeps the historical default (14 -> 16sp).
-            val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
-            LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
-                if (showLoadOlder) {
-                    item {
-                        TextButton(
-                            onClick = { anchorId = oldestId; client.loadOlder(buffer) },
-                            enabled = !loadingOlder,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                if (loadingOlder) "Loading…" else "Load older messages",
-                                color = if (loadingOlder) TextSecondary else AccentBlue,
-                                fontSize = 13.sp,
-                            )
-                        }
-                    }
-                }
-                items(rows.size) { i ->
-                    when (val row = rows[i]) {
-                        is ChatRow.Bubble -> MessageBubble(row.msg, baseSize)
-                        is ChatRow.Action -> ActionLine(row.msg, baseSize)
-                        is ChatRow.SystemLine -> SystemLine(row.msg)
-                        ChatRow.NewMessages -> NewMessagesDivider()
-                    }
-                }
-                item { Spacer(Modifier.height(6.dp)) }
-            }
+        }
 
-            if (!buffer.isSystem) {
+        // Frosted composer, hugging the keyboard.
+        if (!buffer.isSystem) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .onSizeChanged { bottomBarHeightPx = it.height }
+                    .hazeEffect(hazeState, style = glassStyle())
+                    .navigationBarsPadding()
+                    .imePadding(),
+            ) {
                 Composer(
                     draft = draft,
                     onChange = { draft = it },
