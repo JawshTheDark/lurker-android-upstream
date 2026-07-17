@@ -201,6 +201,11 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         client.onForeground()
     }
+
+    override fun onStop() {
+        super.onStop()
+        client.onBackground()
+    }
 }
 
 @Composable

@@ -118,8 +118,15 @@ class LurkerClient {
     // Reconnect bookkeeping.
     private var intentionalClose = false
     private var reconnectScheduled = false
+    private var reconnectRunnable: Runnable? = null
     private var connecting = false
     private var backoffMs = INITIAL_BACKOFF
+
+    /** Last time any frame arrived — the only honest socket-liveness signal. */
+    private var lastFrameAt = 0L
+
+    /** When the app went to background (0 while foregrounded). */
+    private var wentBackgroundAt = 0L
 
     private fun post(block: () -> Unit) = main.post(block)
 
@@ -223,12 +230,45 @@ class LurkerClient {
         }
     }
 
-    /** Called from the Activity's ON_RESUME — reconnect immediately if dropped. */
+    /**
+     * Called from the Activity's ON_RESUME. The hard part: after a long
+     * background, the socket is often DEAD but nothing has told us yet — the
+     * process was frozen when the NAT mapping / server reaped it, so `connected`
+     * still reads true and no callback ever fired. Waiting for the next ping
+     * cycle to notice reads as "spotty for a minute after opening the app".
+     *
+     * So: reconnect NOW (reset backoff, cancel any pending timer) whenever we're
+     * not connected, and *cycle proactively* even when we look connected if the
+     * app was backgrounded for a while and the socket has been silent — a
+     * `?since=` resume is cheap, a zombie socket is not. A healthy socket just
+     * gets a presence nudge.
+     */
     fun onForeground() {
-        if (!loggedIn || connected || connecting || reconnectScheduled || token == null) return
-        backoffMs = INITIAL_BACKOFF
-        openSocket(maxMessageId.takeIf { it > 0 })
+        if (!loggedIn || token == null) return
+        val now = System.currentTimeMillis()
+        val backgroundedLong = wentBackgroundAt > 0 && now - wentBackgroundAt > BACKGROUND_CYCLE_MS
+        val socketQuiet = now - lastFrameAt > STALE_SOCKET_MS
+        wentBackgroundAt = 0
+        if (!connected || (backgroundedLong && socketQuiet)) {
+            backoffMs = INITIAL_BACKOFF
+            cancelScheduledReconnect()
+            connecting = false
+            openSocket(maxMessageId.takeIf { it > 0 })
+        } else {
+            // send() returning false = the socket is dead after all; onFailure
+            // follows and the normal reconnect path takes over immediately.
+            ws?.send(presenceFrame(true))
+        }
     }
+
+    /** Called from the Activity's ON_STOP — remember when we left. */
+    fun onBackground() {
+        wentBackgroundAt = System.currentTimeMillis()
+        ws?.send(presenceFrame(false))
+    }
+
+    private fun presenceFrame(visible: Boolean): String =
+        JSONObject().put("type", "presence").put("visible", visible).toString()
 
     // ---- REST helpers -----------------------------------------------------
 
@@ -275,6 +315,8 @@ class LurkerClient {
             .build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                lastFrameAt = System.currentTimeMillis()
+                webSocket.send(presenceFrame(true))
                 post {
                     connected = true
                     connecting = false
@@ -284,6 +326,7 @@ class LurkerClient {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                lastFrameAt = System.currentTimeMillis()
                 val frame = try {
                     JSONObject(text)
                 } catch (_: Exception) {
@@ -333,10 +376,20 @@ class LurkerClient {
         reconnectScheduled = true
         val delay = backoffMs
         backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF)
-        main.postDelayed({
+        val runnable = Runnable {
             reconnectScheduled = false
+            reconnectRunnable = null
             if (!intentionalClose && token != null) openSocket(maxMessageId.takeIf { it > 0 })
-        }, delay)
+        }
+        reconnectRunnable = runnable
+        main.postDelayed(runnable, delay)
+    }
+
+    /** Drop a pending backoff timer so a foreground revival can connect NOW. */
+    private fun cancelScheduledReconnect() {
+        reconnectRunnable?.let(main::removeCallbacks)
+        reconnectRunnable = null
+        reconnectScheduled = false
     }
 
     // ---- Frame handling ---------------------------------------------------
@@ -1182,6 +1235,12 @@ class LurkerClient {
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 30_000L
         const val SEND_ACK_TIMEOUT = 8_000L // matches the web client's deadline
+
+        /** Background longer than this + a quiet socket -> proactive cycle. */
+        const val BACKGROUND_CYCLE_MS = 30_000L
+
+        /** No frame for this long = the socket can't be trusted (ping is 30s). */
+        const val STALE_SOCKET_MS = 45_000L
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }
