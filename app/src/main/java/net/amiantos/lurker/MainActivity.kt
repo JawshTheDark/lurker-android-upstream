@@ -1226,6 +1226,21 @@ private fun TypingBubble(nicks: List<String>) {
 
 @Composable
 private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
+    if (msg.type == "system") {
+        // :system: log lines read like a terminal: left-aligned, level-tinted.
+        Text(
+            msg.text,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            color = when (msg.level) {
+                "error" -> AlertRed
+                "warn" -> NoticeAmber
+                else -> TextSecondary
+            },
+            modifier = Modifier.fillMaxWidth().padding(16.dp, 3.dp),
+        )
+        return
+    }
     if (msg.type == "send-failed") {
         Text(
             msg.text,

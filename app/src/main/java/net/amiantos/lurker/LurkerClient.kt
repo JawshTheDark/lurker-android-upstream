@@ -871,6 +871,19 @@ class LurkerClient {
                 id = id, type = type, nick = nick, text = text,
                 self = e.optBoolean("self", false), time = e.optString("time").ifEmpty { null },
             )
+            // The :system: buffer's log lines (#355): type 'system', nick null,
+            // with level/scope/source riding alongside.
+            "system" -> Msg(
+                id = id, type = "system", nick = "",
+                text = buildString {
+                    val source = e.optString("source")
+                    if (source.isNotEmpty()) append("[").append(source).append("] ")
+                    append(text)
+                },
+                self = false, time = e.optString("time").ifEmpty { null },
+                system = true,
+                level = e.optString("level").ifEmpty { null },
+            )
             in SYSTEM_TYPES -> Msg(
                 id = id, type = type, nick = "", text = systemLine(type, nick, text, e),
                 self = e.optBoolean("self", false), time = e.optString("time").ifEmpty { null },

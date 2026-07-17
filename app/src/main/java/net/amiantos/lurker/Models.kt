@@ -36,6 +36,8 @@ data class Msg(
     val self: Boolean,
     val time: String? = null,
     val system: Boolean = false,
+    /** Log severity for :system: lines (info/warn/error), null elsewhere. */
+    val level: String? = null,
 )
 
 /** An inbound DCC file transfer, mirrored from the server's transfer rows. */
