@@ -395,7 +395,8 @@ class LurkerClient {
     private fun applyNetworks(arr: JSONArray) {
         for (i in 0 until arr.length()) {
             val n = arr.optJSONObject(i) ?: continue
-            val id = n.optInt("id", -1)
+            // The snapshot blob keys the network as `networkId` (REST uses `id`).
+            val id = n.optInt("networkId", n.optInt("id", -1))
             if (id < 0) continue
             val name = n.optString("name").ifEmpty { networkNames[id] ?: "network" }
             networkNames[id] = name
@@ -677,6 +678,17 @@ class LurkerClient {
                 .put("target", buffer.target)
                 .toString(),
         )
+        // Self-healing roster: the server only pushes `names` on join/NAMES/WHO,
+        // so if we somehow have no roster for a joined channel, ask for one.
+        if (buffer.isChannel && members[buffer.key].isNullOrEmpty()) {
+            ws?.send(
+                JSONObject()
+                    .put("type", "raw")
+                    .put("networkId", networkId)
+                    .put("line", "NAMES ${buffer.target}")
+                    .toString(),
+            )
+        }
     }
 
     /** Ensure a DM/channel buffer exists, hydrate it, and return it for focusing. */
