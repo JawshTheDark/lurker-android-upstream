@@ -61,12 +61,23 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.withStyle
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -132,7 +143,14 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                     Screen.Settings -> SettingsScreen(client) { screen = Screen.Buffers }
-                    Screen.Dcc -> DccScreen(client) { screen = Screen.Buffers }
+                    Screen.Dcc -> DccScreen(
+                        client = client,
+                        onOpenBuffer = { buffer ->
+                            client.setActive(buffer)
+                            screen = Screen.Chat(buffer)
+                        },
+                        onBack = { screen = Screen.Buffers },
+                    )
                 }
             }
         }
@@ -407,11 +425,29 @@ private fun ChatScreen(
     onOpenBuffer: (Buffer) -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    var draft by remember { mutableStateOf("") }
+    var draft by remember { mutableStateOf(TextFieldValue("")) }
+    var showMembers by remember { mutableStateOf(false) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
     val divider = client.dividerAfter[buffer.key]
     val rows = remember(messages, divider) { buildChatRows(messages, divider) }
     val listState = rememberLazyListState()
+
+    // DCC send: remember who we're sending to across the system file picker.
+    val context = LocalContext.current
+    var dccNick by remember { mutableStateOf<String?>(null) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val nick = dccNick
+        dccNick = null
+        val networkId = buffer.networkId
+        if (uri != null && nick != null && networkId != null) {
+            val upload = readUpload(context, uri)
+            if (upload == null) {
+                client.dccError = "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB)."
+            } else {
+                client.dccSendFile(networkId, nick, upload.first, upload.second)
+            }
+        }
+    }
 
     LaunchedEffect(rows.size) {
         if (rows.isNotEmpty()) listState.scrollToItem(rows.lastIndex)
@@ -441,6 +477,18 @@ private fun ChatScreen(
                         Text("⌄", color = TextSecondary, fontSize = 13.sp)
                     }
                 },
+                actions = {
+                    if (buffer.isChannel) {
+                        val count = client.members[buffer.key]?.size ?: 0
+                        TextButton(onClick = { showMembers = true }) {
+                            Text(
+                                if (count > 0) "☰ $count" else "☰",
+                                color = TextSecondary,
+                                fontSize = 15.sp,
+                            )
+                        }
+                    }
+                },
             )
         },
     ) { padding ->
@@ -459,7 +507,7 @@ private fun ChatScreen(
 
             if (!buffer.isSystem) {
                 Composer(draft, { draft = it }, buffer.displayName) {
-                    val text = draft.trim()
+                    val text = draft.text.trim()
                     if (text.isEmpty()) return@Composer
                     when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
                         is ParsedInput.Ops -> {
@@ -470,10 +518,206 @@ private fun ChatScreen(
                         }
                         is ParsedInput.Local -> client.localNotice(buffer, parsed.message)
                     }
-                    draft = ""
+                    draft = TextFieldValue("")
                 }
             }
         }
+    }
+
+    if (showMembers) {
+        MemberSheet(
+            client = client,
+            buffer = buffer,
+            onDismiss = { showMembers = false },
+            onOpenBuffer = { showMembers = false; onOpenBuffer(it) },
+            onPickFileFor = { nick ->
+                dccNick = nick
+                showMembers = false
+                filePicker.launch("*/*")
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MemberSheet(
+    client: LurkerClient,
+    buffer: Buffer,
+    onDismiss: () -> Unit,
+    onOpenBuffer: (Buffer) -> Unit,
+    onPickFileFor: (String) -> Unit,
+) {
+    var selected by remember { mutableStateOf<Member?>(null) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+    ) {
+        val roster = remember(client.members[buffer.key]) {
+            (client.members[buffer.key] ?: emptyList())
+                .sortedWith(compareBy({ it.rank }, { it.nick.lowercase() }))
+        }
+        val sel = selected
+        if (sel == null) {
+            Text(
+                "${buffer.displayName} — ${roster.size} member${if (roster.size == 1) "" else "s"}",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            )
+            if (roster.isEmpty()) {
+                Text(
+                    "No member list yet — the server sends it when the channel is joined.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(24.dp),
+                )
+            }
+            LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                items(roster.size) { i ->
+                    val m = roster[i]
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { selected = m }
+                            .padding(horizontal = 22.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            m.prefix.ifEmpty { " " },
+                            color = if (m.canModerate) NoticeAmber else OnlineGreen,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.width(20.dp),
+                        )
+                        Text(
+                            m.nick,
+                            color = nickColor(m.nick).copy(alpha = if (m.away) 0.45f else 1f),
+                            fontSize = 16.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (m.away) Text("away", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+        } else {
+            MemberActions(
+                client = client,
+                buffer = buffer,
+                member = sel,
+                canModerate = client.myMember(buffer)?.canModerate == true,
+                onBack = { selected = null },
+                onDone = onDismiss,
+                onOpenBuffer = onOpenBuffer,
+                onPickFileFor = onPickFileFor,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MemberActions(
+    client: LurkerClient,
+    buffer: Buffer,
+    member: Member,
+    canModerate: Boolean,
+    onBack: () -> Unit,
+    onDone: () -> Unit,
+    onOpenBuffer: (Buffer) -> Unit,
+    onPickFileFor: (String) -> Unit,
+) {
+    val networkId = buffer.networkId ?: return
+    val nick = member.nick
+    val chan = buffer.target
+    fun raw(line: String) {
+        client.execute(buffer, listOf(WireOp("raw", line = line)))
+        onDone()
+    }
+
+    Column(Modifier.padding(bottom = 24.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        ) {
+            TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 22.sp) }
+            Text(
+                "${member.prefix}$nick",
+                color = nickColor(nick),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 17.sp,
+            )
+            member.host?.let {
+                Spacer(Modifier.width(8.dp))
+                Text(it, color = TextSecondary, fontSize = 12.sp)
+            }
+        }
+        SheetAction("Whois") { raw("WHOIS $nick") }
+        SheetAction("Send a message") {
+            onOpenBuffer(client.focusTarget(networkId, nick))
+        }
+        SheetAction("DCC: send a file…") { onPickFileFor(nick) }
+        SheetAction("DCC: start a chat") {
+            client.dccChat(networkId, nick, open = true)
+            onOpenBuffer(client.focusTarget(networkId, "=$nick"))
+        }
+        if (canModerate) {
+            HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 6.dp))
+            val isOp = "o" in member.modes
+            val hasVoice = "v" in member.modes
+            SheetAction(if (isOp) "Take op" else "Give op") {
+                raw("MODE $chan ${if (isOp) "-o" else "+o"} $nick")
+            }
+            SheetAction(if (hasVoice) "Remove voice" else "Give voice") {
+                raw("MODE $chan ${if (hasVoice) "-v" else "+v"} $nick")
+            }
+            SheetAction("Kick", danger = true) { raw("KICK $chan $nick") }
+            SheetAction("Ban", danger = true) { raw("MODE $chan +b ${member.banMask}") }
+            SheetAction("Kick + ban", danger = true) {
+                client.execute(
+                    buffer,
+                    listOf(
+                        WireOp("raw", line = "MODE $chan +b ${member.banMask}"),
+                        WireOp("raw", line = "KICK $chan $nick"),
+                    ),
+                )
+                onDone()
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (danger) AlertRed else Color.White,
+        fontSize = 16.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 26.dp, vertical = 12.dp),
+    )
+}
+
+/** Max file we'll buffer for a DCC send (the server's own ceiling is higher). */
+private const val MAX_DCC_UPLOAD_MB = 100
+
+/** Read a content Uri into (displayName, bytes); null when unreadable/too big. */
+private fun readUpload(context: android.content.Context, uri: android.net.Uri): Pair<String, ByteArray>? {
+    return try {
+        var name = "file"
+        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) name = c.getString(idx) ?: name
+        }
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+        if (bytes.size > MAX_DCC_UPLOAD_MB * 1024 * 1024) return null
+        name to bytes
+    } catch (_: Exception) {
+        null
     }
 }
 
@@ -584,46 +828,234 @@ private fun NewMessagesDivider() {
     )
 }
 
-@Composable
-private fun Composer(draft: String, onChange: (String) -> Unit, target: String, onSend: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(10.dp, 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextField(
-            value = draft,
-            onValueChange = onChange,
-            placeholder = { Text("Message $target", color = TextSecondary) },
-            shape = RoundedCornerShape(22.dp),
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = SurfaceDark,
-                unfocusedContainerColor = SurfaceDark,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                cursorColor = AccentBlue,
-            ),
-            modifier = Modifier.weight(1f),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() }),
+/**
+ * Wrap the selection in mIRC control codes, or insert the opening code at the
+ * cursor (mIRC toggle semantics make a lone opener valid — it formats what's
+ * typed after it).
+ */
+private fun applyFormat(v: TextFieldValue, code: String, end: String = code): TextFieldValue {
+    val sel = v.selection
+    return if (sel.collapsed) {
+        val at = sel.start.coerceIn(0, v.text.length)
+        TextFieldValue(
+            v.text.substring(0, at) + code + v.text.substring(at),
+            TextRange(at + code.length),
         )
-        TextButton(onClick = onSend, enabled = draft.isNotBlank()) {
-            Text("Send", color = if (draft.isNotBlank()) AccentBlue else TextSecondary, fontWeight = FontWeight.SemiBold)
+    } else {
+        val lo = minOf(sel.start, sel.end)
+        val hi = maxOf(sel.start, sel.end)
+        TextFieldValue(
+            v.text.substring(0, lo) + code + v.text.substring(lo, hi) + end + v.text.substring(hi),
+            TextRange(hi + code.length + end.length),
+        )
+    }
+}
+
+@Composable
+private fun Composer(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit, target: String, onSend: () -> Unit) {
+    var showFormat by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        if (showFormat) FormatBar(draft, onChange)
+        Row(
+            Modifier.fillMaxWidth().padding(10.dp, 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { showFormat = !showFormat }) {
+                Text(
+                    "Aa",
+                    color = if (showFormat) AccentBlue else TextSecondary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+            }
+            TextField(
+                value = draft,
+                onValueChange = onChange,
+                placeholder = { Text("Message $target", color = TextSecondary) },
+                shape = RoundedCornerShape(22.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = SurfaceDark,
+                    unfocusedContainerColor = SurfaceDark,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    cursorColor = AccentBlue,
+                ),
+                modifier = Modifier.weight(1f),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { onSend() }),
+            )
+            TextButton(onClick = onSend, enabled = draft.text.isNotBlank()) {
+                Text(
+                    "Send",
+                    color = if (draft.text.isNotBlank()) AccentBlue else TextSecondary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit) {
+    var showColors by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        FormatKey("B", bold = true) { onChange(applyFormat(draft, Fmt.BOLD)) }
+        FormatKey("I", italic = true) { onChange(applyFormat(draft, Fmt.ITALIC)) }
+        FormatKey("U", underline = true) { onChange(applyFormat(draft, Fmt.UNDERLINE)) }
+        FormatKey("S", strike = true) { onChange(applyFormat(draft, Fmt.STRIKE)) }
+        FormatKey("M", mono = true) { onChange(applyFormat(draft, Fmt.MONO)) }
+        Box {
+            // Color entry point: a rainbow chip that opens the classic palette.
+            Box(
+                Modifier
+                    .padding(start = 8.dp)
+                    .size(22.dp)
+                    .background(
+                        Brush.sweepGradient(
+                            listOf(
+                                Color(0xFFFF453A), Color(0xFFFFD60A), Color(0xFF30D158),
+                                Color(0xFF0A84FF), Color(0xFFBF5AF2), Color(0xFFFF453A),
+                            ),
+                        ),
+                        CircleShape,
+                    )
+                    .clickable { showColors = true },
+            )
+            DropdownMenu(expanded = showColors, onDismissRequest = { showColors = false }) {
+                Column(Modifier.padding(10.dp)) {
+                    for (rowStart in 0 until 16 step 8) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (i in rowStart until rowStart + 8) {
+                                Box(
+                                    Modifier
+                                        .size(26.dp)
+                                        .background(Color(Mirc.color(i) ?: 0), CircleShape)
+                                        .border(1.dp, PillGray, CircleShape)
+                                        .clickable {
+                                            showColors = false
+                                            // Selection gets color..clear; bare opener at cursor.
+                                            onChange(applyFormat(draft, Fmt.color(i), Fmt.COLOR))
+                                        },
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    TextButton(onClick = {
+                        showColors = false
+                        onChange(applyFormat(draft, Fmt.RESET, ""))
+                    }) { Text("Clear formatting", color = TextSecondary, fontSize = 13.sp) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FormatKey(
+    label: String,
+    bold: Boolean = false,
+    italic: Boolean = false,
+    underline: Boolean = false,
+    strike: Boolean = false,
+    mono: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(36.dp)
+            .background(SurfaceDark, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            fontSize = 15.sp,
+            color = Color.White,
+            fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+            fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+            fontFamily = if (mono) FontFamily.Monospace else null,
+            textDecoration = when {
+                underline -> TextDecoration.Underline
+                strike -> TextDecoration.LineThrough
+                else -> null
+            },
+        )
     }
 }
 
 // ---- Settings ------------------------------------------------------------
 
+// Category order + labels mirror shared/settingsRegistry.ts CATEGORIES (only
+// the registry-driven ones — bespoke panes like Networks/Account are web-only).
+// Categories not listed still render, alphabetically after these.
+private val CATEGORY_META = listOf(
+    "appearance" to "Appearance",
+    "chat" to "Chat",
+    "input" to "Input bar",
+    "uploads" to "Uploads",
+    "notifications" to "Notifications",
+    "away" to "Away",
+    "fserve" to "File server",
+    "dcc" to "DCC transfers",
+)
+
+// Group headers, mirroring the GROUPS map in shared/settingsRegistry.ts.
+private val GROUP_LABELS = mapOf(
+    "fonts" to "Fonts", "palette" to "Colors", "messages" to "Message rows",
+    "members" to "Member prefixes", "buffer-list" to "Buffer list",
+    "nicks" to "Nick coloring", "layout" to "Layout", "misc" to "Misc",
+    "consolidate" to "Join/part consolidation", "routing" to "Message routing",
+    "channel-behavior" to "Channels", "composing" to "Composing",
+    "smart-filter" to "Smart filter", "viewing" to "Viewing",
+    "connection" to "Connection", "ctcp" to "CTCP replies",
+    "system_features" to "System text features", "autocomplete" to "Autocomplete",
+    "formatting" to "Formatting", "auto-away" to "Auto-away",
+    "alerts" to "Alerts", "push_filters" to "Push filters", "pipeline" to "Image pipeline",
+    "fserve" to "File server", "fserve-queue" to "Queue & sends",
+    "fserve-ads" to "Advertising", "fserve-find" to "Search (@find)",
+    "fserve-files" to "File filters",
+    "dcc-incoming" to "Incoming", "dcc-outgoing" to "Outgoing", "dcc-notify" to "Notifications",
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
+    var category by remember { mutableStateOf<String?>(null) }
+    BackHandler { if (category != null) category = null else onBack() }
+
+    val byCategory = remember(client.settingsRegistry.toList()) {
+        client.settingsRegistry
+            .filter { it.category.isNotEmpty() && it.category != "system" }
+            .groupBy { it.category }
+    }
+    val orderedCategories = remember(byCategory) {
+        val known = CATEGORY_META.map { it.first }.filter { it in byCategory }
+        known + (byCategory.keys - known.toSet()).sorted()
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
         topBar = {
-            TopAppBar(
-                navigationIcon = { TextButton(onClick = onBack) { Text("‹") } },
-                title = { Text("Settings") },
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = { if (category != null) category = null else onBack() }) {
+                        Text("‹", color = AccentBlue, fontSize = 26.sp)
+                    }
+                },
+                title = {
+                    Text(
+                        category?.let { c -> CATEGORY_META.firstOrNull { it.first == c }?.second ?: c.replaceFirstChar { ch -> ch.uppercase() } }
+                            ?: "Settings",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                },
             )
         },
     ) { padding ->
@@ -635,26 +1067,79 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
                 Text(client.settingsError ?: "No settings available on this server.")
             }
 
+            category == null -> LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+                client.settingsError?.let { err ->
+                    item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
+                }
+                item { Spacer(Modifier.height(8.dp)) }
+                items(orderedCategories.size) { i ->
+                    val cat = orderedCategories[i]
+                    val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
+                        ?: cat.replaceFirstChar { it.uppercase() }
+                    Surface(
+                        color = SurfaceDark,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { category = cat }
+                                .padding(16.dp, 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(label, fontSize = 17.sp)
+                                Text(
+                                    "${byCategory.getValue(cat).size} settings",
+                                    color = TextSecondary,
+                                    fontSize = 13.sp,
+                                )
+                            }
+                            Text("›", color = TextSecondary, fontSize = 20.sp)
+                        }
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+
             else -> {
-                val groups = remember(client.settingsRegistry.toList()) {
-                    client.settingsRegistry.groupBy { it.group }
+                // groupBy preserves registry order, which is the designed order.
+                val groups = remember(category) {
+                    byCategory[category].orEmpty().groupBy { it.group }
                 }
                 LazyColumn(Modifier.padding(padding).fillMaxSize()) {
-                    client.settingsError?.let { err ->
-                        item { Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-                    }
-                    for (group in groups.keys.sorted()) {
+                    for ((group, options) in groups) {
                         item {
                             Text(
-                                group.replaceFirstChar { it.uppercase() },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.fillMaxWidth().padding(16.dp, 16.dp, 16.dp, 4.dp),
+                                GROUP_LABELS[group] ?: group.replaceFirstChar { it.uppercase() },
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = TextSecondary,
+                                modifier = Modifier.fillMaxWidth().padding(28.dp, 18.dp, 16.dp, 6.dp),
                             )
                         }
-                        val options = groups.getValue(group)
-                        items(options.size) { i -> SettingRow(client, options[i]) }
+                        item {
+                            Surface(
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            ) {
+                                Column {
+                                    options.forEachIndexed { i, option ->
+                                        SettingRow(client, option)
+                                        if (i < options.lastIndex) {
+                                            HorizontalDivider(
+                                                color = SurfaceRaised,
+                                                modifier = Modifier.padding(start = 16.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
+                    item { Spacer(Modifier.height(24.dp)) }
                 }
             }
         }
@@ -663,8 +1148,10 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
 
 @Composable
 private fun SettingRow(client: LurkerClient, option: SettingOption) {
-    val value = client.settingsValues[option.key]
-    Column(Modifier.fillMaxWidth().padding(16.dp, 8.dp)) {
+    val overridden = client.settingsValues.containsKey(option.key)
+    // Bootstrap `values` carries only overrides; everything else shows its default.
+    val value = if (overridden) client.settingsValues[option.key] else option.default
+    Column(Modifier.fillMaxWidth().padding(16.dp, 10.dp)) {
         when (option.type) {
             "bool" -> Row(
                 Modifier.fillMaxWidth(),
@@ -699,8 +1186,28 @@ private fun SettingRow(client: LurkerClient, option: SettingOption) {
                 client.patchSetting(option.key, it)
             }
         }
+        if (option.description.isNotEmpty()) {
+            Text(
+                option.description,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(option.key, color = PillGray, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            if (overridden) {
+                Text(
+                    "Reset",
+                    color = AccentBlue,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .clickable { client.resetSetting(option.key) }
+                        .padding(4.dp),
+                )
+            }
+        }
     }
-    HorizontalDivider()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -753,14 +1260,18 @@ private fun EditableSetting(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DccScreen(client: LurkerClient, onBack: () -> Unit) {
+private fun DccScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
         topBar = {
-            TopAppBar(
-                navigationIcon = { TextButton(onClick = onBack) { Text("‹") } },
-                title = { Text("DCC transfers") },
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text("DCC transfers", fontWeight = FontWeight.SemiBold) },
             )
         },
     ) { padding ->
@@ -775,13 +1286,96 @@ private fun DccScreen(client: LurkerClient, onBack: () -> Unit) {
         }
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             client.dccError?.let { err ->
-                item { Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+                item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
             }
+            item { DccStartCard(client, onOpenBuffer) }
             if (transfers.isEmpty()) {
-                item { Text("No transfers.", Modifier.padding(16.dp)) }
+                item { Text("No transfers.", Modifier.padding(16.dp), color = TextSecondary) }
             }
             items(transfers.size) { i -> TransferRow(client, transfers[i]) }
-            item { SendChatScaffold() }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+/** Start an outgoing DCC send or chat: pick a network, type a nick, go. */
+@Composable
+private fun DccStartCard(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit) {
+    val context = LocalContext.current
+    var nick by remember { mutableStateOf("") }
+    val connected = client.networks.values.filter { it.connected }
+    var networkId by remember(connected.map { it.id }) {
+        mutableStateOf(connected.firstOrNull()?.id)
+    }
+    var netMenu by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val id = networkId
+        val who = nick.trim()
+        if (uri != null && id != null && who.isNotEmpty()) {
+            val upload = readUpload(context, uri)
+            if (upload == null) {
+                client.dccError = "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB)."
+            } else {
+                client.dccSendFile(id, who, upload.first, upload.second)
+            }
+        }
+    }
+
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 8.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Start a transfer or chat", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box {
+                    TextButton(onClick = { netMenu = true }) {
+                        Text(
+                            connected.firstOrNull { it.id == networkId }?.name ?: "No network",
+                            color = AccentBlue,
+                        )
+                    }
+                    DropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
+                        connected.forEach { n ->
+                            DropdownMenuItem(
+                                text = { Text(n.name) },
+                                onClick = { networkId = n.id; netMenu = false },
+                            )
+                        }
+                    }
+                }
+                TextField(
+                    value = nick,
+                    onValueChange = { nick = it },
+                    placeholder = { Text("nick", color = TextSecondary) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = SurfaceRaised,
+                        unfocusedContainerColor = SurfaceRaised,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        cursorColor = AccentBlue,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { picker.launch("*/*") },
+                    enabled = networkId != null && nick.isNotBlank(),
+                ) { Text("Send a file…") }
+                TextButton(
+                    onClick = {
+                        val id = networkId ?: return@TextButton
+                        val who = nick.trim()
+                        client.dccChat(id, who, open = true)
+                        onOpenBuffer(client.focusTarget(id, "=$who"))
+                    },
+                    enabled = networkId != null && nick.isNotBlank(),
+                ) { Text("Start a chat") }
+            }
         }
     }
 }
@@ -791,7 +1385,7 @@ private fun TransferRow(client: LurkerClient, t: DccTransfer) {
     Column(Modifier.fillMaxWidth().padding(16.dp, 10.dp)) {
         Text(t.filename, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
         Text(
-            "from ${t.peerNick} · ${t.state}" + (t.error?.let { " · $it" } ?: ""),
+            "${if (t.isSend) "to" else "from"} ${t.peerNick} · ${t.state}" + (t.error?.let { " · $it" } ?: ""),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
         )
@@ -813,28 +1407,6 @@ private fun TransferRow(client: LurkerClient, t: DccTransfer) {
         }
     }
     HorizontalDivider()
-}
-
-/**
- * Placeholder for outgoing DCC. The send/chat engine exists on the server's
- * lurker-pr branch but its routes and WS frames aren't wired or deployed yet, so
- * there is nothing to call. This card keeps the surface visible and is ready to
- * light up the moment the API ships.
- */
-@Composable
-private fun SendChatScaffold() {
-    Card(Modifier.fillMaxWidth().padding(16.dp)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Send a file / DCC chat", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "Outgoing DCC send and chat are awaiting server support. This UI is " +
-                    "scaffolded and will be wired once the endpoints ship.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            Button(onClick = {}, enabled = false) { Text("Send file (coming soon)") }
-        }
-    }
 }
 
 private fun humanBytes(n: Long): String {

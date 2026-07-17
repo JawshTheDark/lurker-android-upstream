@@ -17,6 +17,23 @@ package net.amiantos.lurker
  * bridge lives in MircText.kt.
  */
 
+/**
+ * Control-code strings for COMPOSING formatted text (the parser's constants are
+ * chars and private; senders want strings to splice into drafts). Color indices
+ * are written zero-padded ("04") so a following digit can't be swallowed.
+ */
+object Fmt {
+    const val BOLD = "\u0002"
+    const val ITALIC = "\u001D"
+    const val UNDERLINE = "\u001F"
+    const val STRIKE = "\u001E"
+    const val MONO = "\u0011"
+    const val COLOR = "\u0003"
+    const val RESET = "\u000F"
+
+    fun color(index: Int): String = COLOR + "%02d".format(index)
+}
+
 /** A run of text sharing one visual style. `fg`/`bg` are ARGB ints or null. */
 data class Span(
     val text: String,

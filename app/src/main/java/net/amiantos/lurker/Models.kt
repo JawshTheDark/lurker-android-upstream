@@ -52,10 +52,54 @@ data class DccTransfer(
     val progress: Float
         get() = if (total > 0) (received.toFloat() / total).coerceIn(0f, 1f) else 0f
     val isPending: Boolean get() = state == "pending_approval"
+    val isSend: Boolean get() = direction == "send"
     val isActive: Boolean
-        get() = state in setOf("connecting", "receiving", "stalled", "verifying", "requested")
+        get() = state in setOf(
+            "connecting", "receiving", "stalled", "verifying", "requested",
+            "offering", "sending", // outgoing-send states
+        )
     val isTerminal: Boolean
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
+}
+
+/**
+ * A channel member from `names` frames. `modes` are IRC mode letters
+ * (q owner / a admin / o op / h halfop / v voice); the glyph mapping is
+ * client-side, mirroring the web client (the server doesn't read ISUPPORT
+ * PREFIX yet).
+ */
+data class Member(
+    val nick: String,
+    val modes: List<String> = emptyList(),
+    val away: Boolean = false,
+    val host: String? = null,
+) {
+    val prefix: String
+        get() = when {
+            "q" in modes -> "~"
+            "a" in modes -> "&"
+            "o" in modes -> "@"
+            "h" in modes -> "%"
+            "v" in modes -> "+"
+            else -> ""
+        }
+
+    /** Sort rank: owner first, plain members last. */
+    val rank: Int
+        get() = when {
+            "q" in modes -> 0
+            "a" in modes -> 1
+            "o" in modes -> 2
+            "h" in modes -> 3
+            "v" in modes -> 4
+            else -> 5
+        }
+
+    /** Can this member moderate (op-gated menu actions)? Mirrors the web's MODERATE_MODES. */
+    val canModerate: Boolean get() = modes.any { it == "q" || it == "a" || it == "o" || it == "h" }
+
+    /** Ban mask, host-based when the host is known (mirrors the web client). */
+    val banMask: String get() = host?.let { "*!*@$it" } ?: "$nick!*@*"
 }
 
 /**
@@ -68,6 +112,9 @@ data class SettingOption(
     val label: String,
     val type: String, // bool | int | string | secret | color | enum | string-list
     val group: String,
+    val category: String = "",
+    val description: String = "",
+    val default: Any? = null,
     val choices: List<String> = emptyList(),
     val min: Int? = null,
     val max: Int? = null,

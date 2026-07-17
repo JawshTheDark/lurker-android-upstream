@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import android.os.Handler
 import android.os.Looper
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -53,6 +54,9 @@ class LurkerClient {
     /** bufferKey -> unread / highlight counts for badges. */
     val unread = mutableStateMapOf<String, Int>()
     val highlights = mutableStateMapOf<String, Int>()
+
+    /** bufferKey -> channel roster, from names frames + incremental events. */
+    val members = mutableStateMapOf<String, List<Member>>()
 
     /** bufferKey -> server read cursor (highest id the user has read). */
     private val lastRead = mutableMapOf<String, Long>()
@@ -180,6 +184,7 @@ class LurkerClient {
             highlights.clear()
             lastRead.clear()
             dividerAfter.clear()
+            members.clear()
             transfers.clear()
             settingsRegistry.clear()
             settingsValues.clear()
@@ -340,6 +345,9 @@ class LurkerClient {
                 if (target.isEmpty()) return
                 bumpCursor(frame.optLong("id"))
                 val buffer = ensureBuffer(networkId, target)
+                // Roster updates ride the same stream; apply before the renderable
+                // check (names/channel-parted produce no chat line at all).
+                applyMemberEvent(buffer.key, frame)
                 val msg = parseEvent(frame) ?: return
                 mergeInto(buffer.key, listOf(msg), replace = false)
                 countUnread(buffer.key, frame, msg)
@@ -389,7 +397,72 @@ class LurkerClient {
                 nick = n.optString("nick").ifEmpty { null },
                 connected = n.optBoolean("connected", n.optString("state") == "connected"),
             )
+            // The snapshot carries each channel's member roster inline.
+            n.optJSONArray("channels")?.let { chans ->
+                for (c in 0 until chans.length()) {
+                    val ch = chans.optJSONObject(c) ?: continue
+                    val chName = ch.optString("name")
+                    val roster = ch.optJSONArray("members") ?: continue
+                    if (chName.isNotEmpty()) members["$id::$chName"] = parseMembers(roster)
+                }
+            }
         }
+    }
+
+    // ---- Channel members ----------------------------------------------------
+
+    private fun parseMembers(arr: JSONArray): List<Member> =
+        (0 until arr.length()).mapNotNull { i ->
+            val m = arr.optJSONObject(i) ?: return@mapNotNull null
+            val nick = m.optString("nick")
+            if (nick.isEmpty()) return@mapNotNull null
+            Member(
+                nick = nick,
+                modes = m.optJSONArray("modes")?.let { md ->
+                    (0 until md.length()).map { md.optString(it) }
+                } ?: emptyList(),
+                away = m.optBoolean("away", false),
+                host = m.optString("host").ifEmpty { null },
+            )
+        }
+
+    /**
+     * Keep per-buffer rosters current. `names` frames replace wholesale; the
+     * join/part/quit/kick/nick stream is applied incrementally (the server does
+     * NOT re-send names for those — mirrors the web client's store).
+     */
+    private fun applyMemberEvent(key: String, frame: JSONObject) {
+        when (frame.optString("type")) {
+            "names" -> frame.optJSONArray("members")?.let { members[key] = parseMembers(it) }
+            "join" -> {
+                val nick = frame.optString("nick")
+                val cur = members[key] ?: return
+                if (nick.isNotEmpty() && cur.none { it.nick.equals(nick, true) }) {
+                    members[key] = cur + Member(nick)
+                }
+            }
+            "part", "quit" -> removeMember(key, frame.optString("nick"))
+            "kick" -> removeMember(key, frame.optString("kicked"))
+            "nick" -> {
+                val to = frame.optString("newNick")
+                val from = frame.optString("nick")
+                val cur = members[key] ?: return
+                if (to.isEmpty()) return
+                members[key] = cur.map { if (it.nick.equals(from, true)) it.copy(nick = to) else it }
+            }
+            "channel-parted" -> members.remove(key)
+        }
+    }
+
+    private fun removeMember(key: String, nick: String) {
+        if (nick.isEmpty()) return
+        members[key]?.let { cur -> members[key] = cur.filterNot { it.nick.equals(nick, true) } }
+    }
+
+    /** The signed-in user's own membership row in [buffer], for op-gating menus. */
+    fun myMember(buffer: Buffer): Member? {
+        val nick = buffer.networkId?.let { networks[it]?.nick } ?: return null
+        return members[buffer.key]?.firstOrNull { it.nick.equals(nick, true) }
     }
 
     private fun bumpCursor(id: Long) {
@@ -632,6 +705,53 @@ class LurkerClient {
         }
     }
 
+    /**
+     * Offer a file to [nick] over DCC SEND. Bytes go up as multipart; the server
+     * stages them in its DCC dir and CTCP-offers the peer (active or passive per
+     * server config + dcc.prefer_passive). Progress arrives as dcc-transfer frames.
+     */
+    fun dccSendFile(networkId: Int, nick: String, filename: String, bytes: ByteArray) = io.execute {
+        try {
+            val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("networkId", networkId.toString())
+                .addFormDataPart("nick", nick)
+                .addFormDataPart("file", filename, bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build()
+            http.newCall(authed("/api/dcc/send").post(body).build()).execute().use { res ->
+                val bodyText = res.body?.string().orEmpty()
+                if (!res.isSuccessful) {
+                    val err = runCatching { JSONObject(bodyText).optString("error") }.getOrNull()
+                    post { dccError = err?.ifEmpty { null } ?: "DCC send failed (HTTP ${res.code})" }
+                    return@execute
+                }
+                JSONObject(bodyText).optJSONObject("transfer")?.let {
+                    post { dccEnabled = true; dccError = null; applyTransfer(it) }
+                }
+            }
+        } catch (e: Exception) {
+            post { dccError = "DCC send failed: ${e.message}" }
+        }
+    }
+
+    /** Open (or close) a DCC chat with [nick]. The chat lives in the "=nick" buffer. */
+    fun dccChat(networkId: Int, nick: String, open: Boolean) = io.execute {
+        try {
+            val path = if (open) "/api/dcc/chat" else "/api/dcc/chat/close"
+            val body = JSONObject().put("networkId", networkId).put("nick", nick)
+                .toString().toRequestBody(json)
+            http.newCall(authed(path).post(body).build()).execute().use { res ->
+                if (!res.isSuccessful) {
+                    val err = runCatching {
+                        JSONObject(res.body?.string().orEmpty()).optString("error")
+                    }.getOrNull()
+                    post { dccError = err?.ifEmpty { null } ?: "DCC chat failed (HTTP ${res.code})" }
+                }
+            }
+        } catch (e: Exception) {
+            post { dccError = "DCC chat failed: ${e.message}" }
+        }
+    }
+
     private fun applyTransfer(o: JSONObject) {
         val id = o.optInt("id", -1)
         if (id < 0) return
@@ -706,6 +826,9 @@ class LurkerClient {
     private fun applyValues(res: Response) {
         val vals = JSONObject(res.body?.string().orEmpty()).optJSONObject("values") ?: return
         post {
+            // The response is the FULL override map — replace, don't merge, so a
+            // reset (key removed server-side) also disappears locally.
+            settingsValues.clear()
             for (k in vals.keys()) settingsValues[k] = jsonToValue(vals.get(k))
             settingsError = null
         }
@@ -721,6 +844,9 @@ class LurkerClient {
             label = o.optString("label").ifEmpty { key.substringAfterLast('.') },
             type = o.optString("type", "string"),
             group = o.optString("group").ifEmpty { key.substringBefore('.') },
+            category = o.optString("category"),
+            description = o.optString("description"),
+            default = jsonToValue(o.opt("default")),
             choices = choices,
             min = if (o.has("min")) o.optInt("min") else null,
             max = if (o.has("max")) o.optInt("max") else null,
