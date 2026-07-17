@@ -284,6 +284,7 @@ class LurkerClient {
             http.newCall(authed("/api/networks").build()).execute().use { res ->
                 if (!res.isSuccessful) return
                 val arr = JSONObject(res.body?.string().orEmpty()).optJSONArray("networks") ?: return
+                val configs = mutableListOf<NetworkConfig>()
                 for (i in 0 until arr.length()) {
                     val n = arr.getJSONObject(i)
                     val id = n.getInt("id")
@@ -296,10 +297,39 @@ class LurkerClient {
                         connected = n.optBoolean("connected", n.optString("state") == "connected"),
                     )
                     post { networks[id] = net }
+                    parseNetworkConfig(n)?.let(configs::add)
+                }
+                // The REST order IS the user's chosen sidebar order — the buffer
+                // list sections follow it.
+                post {
+                    networkConfigs.clear()
+                    networkConfigs.addAll(configs)
                 }
             }
         } catch (_: Exception) {
             // Names are cosmetic; the buffer list still works without them.
+        }
+    }
+
+    /** Position of a network (by display name) in the user's chosen order. */
+    fun networkOrder(name: String): Int {
+        val i = networkConfigs.indexOfFirst { it.name.equals(name, true) }
+        return if (i >= 0) i else Int.MAX_VALUE
+    }
+
+    /** Persist a full network ordering (must contain every network id). */
+    fun reorderNetworks(ids: List<Int>) = io.execute {
+        try {
+            val body = JSONObject().put("ids", org.json.JSONArray(ids)).toString().toRequestBody(json)
+            http.newCall(authed("/api/networks/reorder").post(body).build()).execute().use { res ->
+                if (!res.isSuccessful) {
+                    post { networksError = "reorder failed (HTTP ${res.code})" }
+                }
+                // Already on the io thread; refreshes names, states, and order.
+                fetchNetworkNames()
+            }
+        } catch (e: Exception) {
+            post { networksError = "reorder failed: ${e.message}" }
         }
     }
 
@@ -319,6 +349,7 @@ class LurkerClient {
             .build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                android.util.Log.i("LurkerWS", "open")
                 lastFrameAt = System.currentTimeMillis()
                 webSocket.send(presenceFrame(true))
                 post {
@@ -340,6 +371,7 @@ class LurkerClient {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                android.util.Log.w("LurkerWS", "failure http=${response?.code} ${t.javaClass.simpleName}: ${t.message}")
                 val code = response?.code
                 post {
                     connected = false
@@ -360,6 +392,7 @@ class LurkerClient {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                android.util.Log.w("LurkerWS", "closed code=$code reason=$reason")
                 post {
                     connected = false
                     connecting = false

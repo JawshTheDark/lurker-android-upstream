@@ -327,6 +327,7 @@ private fun BufferListScreen(
             client.buffers.toList(),
             client.unread.toMap(),
             client.networks.toMap(),
+            client.networkConfigs.toList(),
         ) { buildBufferSections(client) }
 
         if (rows.isEmpty()) {
@@ -451,20 +452,26 @@ private fun BufferListBody(
 
 private data class BufferSection(val network: String, val buffers: List<Buffer>)
 
-/** Group buffers by network, DMs after channels, unread floated to the top. */
+/**
+ * Group buffers by network. Sections follow the user's chosen network order
+ * (the /api/networks sidebar order, rearrangeable on the Networks screen);
+ * within a section the Server row leads, then unread, channels, DMs.
+ */
 private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     val byNetwork = client.buffers.groupBy { it.networkName }
-    return byNetwork.keys.sortedBy { it.lowercase() }.map { network ->
-        BufferSection(
-            network = network,
-            buffers = byNetwork.getValue(network).sortedWith(
-                compareByDescending<Buffer> { (client.unread[it.key] ?: 0) > 0 }
-                    .thenByDescending { it.isChannel }
-                    .thenBy { it.isServerBuffer } // Server row anchors the bottom, like iOS
-                    .thenBy { it.target.lowercase() },
-            ),
-        )
-    }
+    return byNetwork.keys
+        .sortedWith(compareBy({ client.networkOrder(it) }, { it.lowercase() }))
+        .map { network ->
+            BufferSection(
+                network = network,
+                buffers = byNetwork.getValue(network).sortedWith(
+                    compareByDescending<Buffer> { it.isServerBuffer } // Server row leads
+                        .thenByDescending { (client.unread[it.key] ?: 0) > 0 }
+                        .thenByDescending { it.isChannel }
+                        .thenBy { it.target.lowercase() },
+                ),
+            )
+        }
 }
 
 @Composable
@@ -1847,6 +1854,30 @@ private fun NetworksScreen(
                             ConnectionDot(connected)
                             Spacer(Modifier.width(8.dp))
                             Text(cfg.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            // Arrange: swap with the neighbor and persist the order
+                            // (drives the buffer-list section order too).
+                            TextButton(
+                                onClick = {
+                                    val ids = client.networkConfigs.map { it.id }.toMutableList()
+                                    val at = ids.indexOf(cfg.id)
+                                    if (at > 0) {
+                                        ids[at] = ids[at - 1].also { ids[at - 1] = ids[at] }
+                                        client.reorderNetworks(ids)
+                                    }
+                                },
+                                enabled = i > 0,
+                            ) { Text("↑", color = if (i > 0) TextSecondary else PillGray) }
+                            TextButton(
+                                onClick = {
+                                    val ids = client.networkConfigs.map { it.id }.toMutableList()
+                                    val at = ids.indexOf(cfg.id)
+                                    if (at >= 0 && at < ids.lastIndex) {
+                                        ids[at] = ids[at + 1].also { ids[at + 1] = ids[at] }
+                                        client.reorderNetworks(ids)
+                                    }
+                                },
+                                enabled = i < client.networkConfigs.lastIndex,
+                            ) { Text("↓", color = if (i < client.networkConfigs.lastIndex) TextSecondary else PillGray) }
                             TextButton(onClick = { onEdit(cfg) }) { Text("Edit", color = AccentBlue) }
                         }
                         Text(
