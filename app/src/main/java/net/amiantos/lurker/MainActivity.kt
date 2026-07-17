@@ -85,6 +85,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -905,6 +906,11 @@ private fun MemberSheet(
     var selected by remember { mutableStateOf<Member?>(null) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // Fully expanded, and no drag-to-dismiss: a fast fling in the roster
+        // list used to spill leftover velocity into the sheet gesture and yank
+        // it closed. Close via scrim tap or back.
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetGesturesEnabled = false,
         containerColor = SurfaceDark,
     ) {
         val roster = remember(client.members[buffer.key]) {
