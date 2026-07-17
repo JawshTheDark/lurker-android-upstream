@@ -87,6 +87,10 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody
+import okio.BufferedSink
+import okio.source
 import net.amiantos.lurker.ui.theme.AccentBlue
 import net.amiantos.lurker.ui.theme.AlertRed
 import net.amiantos.lurker.ui.theme.CanvasBlack
@@ -509,7 +513,7 @@ private fun ChatScreen(
     fun uploadIntoDraft(uri: Uri) {
         val upload = readUpload(context, uri)
         if (upload == null) {
-            client.localNotice(buffer, "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB).")
+            client.localNotice(buffer, "Couldn't read that file.")
             return
         }
         client.uploadFile(upload.first, upload.second) { url, err ->
@@ -541,7 +545,7 @@ private fun ChatScreen(
         if (uri != null && nick != null && networkId != null) {
             val upload = readUpload(context, uri)
             if (upload == null) {
-                client.dccError = "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB)."
+                client.dccError = "Couldn't read that file."
             } else {
                 client.dccSendFile(networkId, nick, upload.first, upload.second)
             }
@@ -854,19 +858,38 @@ private fun SheetAction(label: String, danger: Boolean = false, onClick: () -> U
 }
 
 /** Max file we'll buffer for a DCC send (the server's own ceiling is higher). */
-private const val MAX_DCC_UPLOAD_MB = 100
-
-/** Read a content Uri into (displayName, bytes); null when unreadable/too big. */
-private fun readUpload(context: android.content.Context, uri: android.net.Uri): Pair<String, ByteArray>? {
+/**
+ * Resolve a content Uri to (displayName, streaming RequestBody). No size cap
+ * and no buffering — the body streams straight from the content provider into
+ * the socket, so a multi-GB file costs a few KB of memory.
+ */
+private fun readUpload(
+    context: android.content.Context,
+    uri: android.net.Uri,
+): Pair<String, RequestBody>? {
     return try {
         var name = "file"
+        var size = -1L
         context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && c.moveToFirst()) name = c.getString(idx) ?: name
+            if (c.moveToFirst()) {
+                val nameIdx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIdx >= 0) name = c.getString(nameIdx) ?: name
+                val sizeIdx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+            }
         }
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-        if (bytes.size > MAX_DCC_UPLOAD_MB * 1024 * 1024) return null
-        name to bytes
+        // Probe readability now so failures surface as a message, not mid-stream.
+        context.contentResolver.openInputStream(uri)?.close() ?: return null
+        val body = object : RequestBody() {
+            override fun contentType() = "application/octet-stream".toMediaType()
+            override fun contentLength() = size
+            override fun writeTo(sink: BufferedSink) {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    sink.writeAll(input.source())
+                } ?: throw java.io.IOException("content no longer readable: $uri")
+            }
+        }
+        name to body
     } catch (_: Exception) {
         null
     }
@@ -1747,7 +1770,7 @@ private fun DccStartCard(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit) {
         if (uri != null && id != null && who.isNotEmpty()) {
             val upload = readUpload(context, uri)
             if (upload == null) {
-                client.dccError = "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB)."
+                client.dccError = "Couldn't read that file."
             } else {
                 client.dccSendFile(id, who, upload.first, upload.second)
             }

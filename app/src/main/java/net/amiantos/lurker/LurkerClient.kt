@@ -883,15 +883,12 @@ class LurkerClient {
      * local/…) and hand back its public URL. Multipart field is `image` for
      * historical reasons — any file type goes through it.
      */
-    fun uploadFile(filename: String, bytes: ByteArray, onDone: (String?, String?) -> Unit) {
+    fun uploadFile(filename: String, fileBody: okhttp3.RequestBody, onDone: (String?, String?) -> Unit) {
         post { uploading = true }
         io.execute {
             try {
                 val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "image", filename,
-                        bytes.toRequestBody("application/octet-stream".toMediaType()),
-                    )
+                    .addFormDataPart("image", filename, fileBody)
                     .build()
                 http.newCall(authed("/api/uploads").post(body).build()).execute().use { res ->
                     val text = res.body?.string().orEmpty()
@@ -1067,12 +1064,12 @@ class LurkerClient {
      * stages them in its DCC dir and CTCP-offers the peer (active or passive per
      * server config + dcc.prefer_passive). Progress arrives as dcc-transfer frames.
      */
-    fun dccSendFile(networkId: Int, nick: String, filename: String, bytes: ByteArray) = io.execute {
+    fun dccSendFile(networkId: Int, nick: String, filename: String, fileBody: okhttp3.RequestBody) = io.execute {
         try {
             val body = MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart("networkId", networkId.toString())
                 .addFormDataPart("nick", nick)
-                .addFormDataPart("file", filename, bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .addFormDataPart("file", filename, fileBody)
                 .build()
             http.newCall(authed("/api/dcc/send").post(body).build()).execute().use { res ->
                 val bodyText = res.body?.string().orEmpty()
