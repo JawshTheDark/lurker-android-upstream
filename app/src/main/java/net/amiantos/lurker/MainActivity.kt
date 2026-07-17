@@ -9,7 +9,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -348,6 +350,7 @@ private fun BufferListScreen(
                         Spacer(Modifier.width(8.dp))
                         Text(
                             if (client.connected) "Buffers" else "Connecting…",
+                            color = TextPrimary,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
@@ -418,6 +421,9 @@ private fun BufferListBody(
                                 unread = client.unread[buffer.key] ?: 0,
                                 highlight = (client.highlights[buffer.key] ?: 0) > 0,
                                 onClick = { onOpen(buffer) },
+                                onClose = if (buffer.isSystem || buffer.isServerBuffer) null else {
+                                    { client.execute(buffer, listOf(WireOp("close"))) }
+                                },
                             )
                             if (i < section.buffers.lastIndex) {
                                 HorizontalDivider(
@@ -452,13 +458,39 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
 }
 
 @Composable
-private fun BufferRow(buffer: Buffer, unread: Int, highlight: Boolean, onClick: () -> Unit) {
+private fun BufferRow(
+    buffer: Buffer,
+    unread: Int,
+    highlight: Boolean,
+    onClick: () -> Unit,
+    onClose: (() -> Unit)? = null,
+) {
+    var menu by remember { mutableStateOf(false) }
+    if (onClose != null) {
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (buffer.isChannel) "Close (leaves ${buffer.target})" else "Close conversation",
+                        color = AlertRed,
+                    )
+                },
+                onClick = { menu = false; onClose() },
+            )
+        }
+    }
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp, 13.dp),
+        Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = { if (onClose != null) menu = true })
+            .padding(16.dp, 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             buffer.displayName,
+            // Explicit: the glass screens sit outside a Scaffold, so there is no
+            // implicit Material content color to inherit.
+            color = TextPrimary,
             fontSize = 17.sp,
             fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal,
             modifier = Modifier.weight(1f),
@@ -493,20 +525,19 @@ private fun ConnectionDot(connected: Boolean) {
 
 // ---- Chat ------------------------------------------------------------------
 
-/** One rendered row in the chat list, after merging and divider insertion. */
+/** One rendered row in the chat list, after grouping and divider insertion. */
 private sealed interface ChatRow {
-    data class Bubble(val msg: Msg) : ChatRow
+    data class Bubble(val msg: Msg, val first: Boolean, val last: Boolean) : ChatRow
     data class Action(val msg: Msg) : ChatRow
     data class SystemLine(val msg: Msg) : ChatRow
     data object NewMessages : ChatRow
 }
 
 /**
- * Fold messages into bubbles: consecutive messages from the same sender MERGE
- * into one bubble (self included), one line per message, with a format reset
- * between lines so one message's mIRC colors can't bleed into the next. The
- * "New messages" divider slots in where the read cursor sat when the buffer was
- * opened and also breaks a merge — messages after it are new.
+ * Group consecutive messages from the same sender iMessage-style: each message
+ * keeps ITS OWN bubble (a full merge made message boundaries invisible), but a
+ * group stacks tight — nick label once, tightened corners along the shared
+ * edge, timestamp on the last. The "New messages" divider breaks a group.
  */
 private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRow> {
     val out = ArrayList<ChatRow>(messages.size + 1)
@@ -528,17 +559,11 @@ private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRo
                     prevBubble.type == msg.type
                 if (sameGroup) {
                     // The row just before this one is always the previous bubble
-                    // (anything else resets prevBubble): absorb into it.
+                    // (anything else resets prevBubble): it's no longer last.
                     val prev = out.last() as ChatRow.Bubble
-                    out[out.lastIndex] = prev.copy(
-                        msg = prev.msg.copy(
-                            text = prev.msg.text + Fmt.RESET + "\n" + msg.text,
-                            time = msg.time ?: prev.msg.time,
-                        ),
-                    )
-                } else {
-                    out.add(ChatRow.Bubble(msg))
+                    out[out.lastIndex] = prev.copy(last = false)
                 }
+                out.add(ChatRow.Bubble(msg, first = !sameGroup, last = true))
                 prevBubble = msg
             }
         }
@@ -677,7 +702,7 @@ private fun ChatScreen(
             }
             items(rows.size) { i ->
                 when (val row = rows[i]) {
-                    is ChatRow.Bubble -> MessageBubble(row.msg, baseSize)
+                    is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last, baseSize)
                     is ChatRow.Action -> ActionLine(row.msg, baseSize)
                     is ChatRow.SystemLine -> SystemLine(row.msg)
                     ChatRow.NewMessages -> NewMessagesDivider()
@@ -699,19 +724,42 @@ private fun ChatScreen(
                     TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
                 },
                 title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .background(SurfaceDark, RoundedCornerShape(18.dp))
-                            .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
-                            .clickable(onClick = onBack)
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                    ) {
-                        ConnectionDot(client.connected)
-                        Spacer(Modifier.width(7.dp))
-                        Text(buffer.displayName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.width(5.dp))
-                        Text("⌄", color = TextSecondary, fontSize = 13.sp)
+                    var titleMenu by remember { mutableStateOf(false) }
+                    Box {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .background(SurfaceDark, RoundedCornerShape(18.dp))
+                                .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
+                                .combinedClickable(
+                                    onClick = onBack,
+                                    onLongClick = {
+                                        if (!buffer.isSystem && !buffer.isServerBuffer) titleMenu = true
+                                    },
+                                )
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                        ) {
+                            ConnectionDot(client.connected)
+                            Spacer(Modifier.width(7.dp))
+                            Text(buffer.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.width(5.dp))
+                            Text("⌄", color = TextSecondary, fontSize = 13.sp)
+                        }
+                        DropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (buffer.isChannel) "Close (leaves ${buffer.target})" else "Close conversation",
+                                        color = AlertRed,
+                                    )
+                                },
+                                onClick = {
+                                    titleMenu = false
+                                    client.execute(buffer, listOf(WireOp("close")))
+                                    onBack()
+                                },
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -981,8 +1029,18 @@ private fun readUpload(
 }
 
 @Composable
-private fun MessageBubble(msg: Msg, baseSize: Int) {
+private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean, baseSize: Int) {
     val self = msg.self
+    // Grouping reads through the corners: the shared edge between messages of
+    // one group is tightened, the outside stays fully rounded.
+    val big = 18.dp
+    val tight = 5.dp
+    val shape = RoundedCornerShape(
+        topStart = if (!self && !first) tight else big,
+        topEnd = if (self && !first) tight else big,
+        bottomStart = if (!self && !last) tight else big,
+        bottomEnd = if (self && !last) tight else big,
+    )
     Column(
         horizontalAlignment = if (self) Alignment.End else Alignment.Start,
         modifier = Modifier
@@ -990,11 +1048,11 @@ private fun MessageBubble(msg: Msg, baseSize: Int) {
             .padding(
                 start = if (self) 64.dp else 12.dp,
                 end = if (self) 12.dp else 64.dp,
-                top = 8.dp,
+                top = if (first) 8.dp else 2.dp,
                 bottom = 1.dp,
             ),
     ) {
-        if (!self) {
+        if (first && !self) {
             Text(
                 msg.nick,
                 color = nickColor(msg.nick),
@@ -1005,7 +1063,7 @@ private fun MessageBubble(msg: Msg, baseSize: Int) {
         }
         Box(
             Modifier
-                .background(if (self) AccentBlue else SurfaceRaised, RoundedCornerShape(18.dp))
+                .background(if (self) AccentBlue else SurfaceRaised, shape)
                 .padding(horizontal = 13.dp, vertical = 7.dp),
         ) {
             val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue)
@@ -1021,17 +1079,19 @@ private fun MessageBubble(msg: Msg, baseSize: Int) {
                 fontSize = baseSize.sp,
             )
         }
-        Text(
-            formatTime(msg.time) ?: "",
-            color = TextSecondary,
-            fontSize = (baseSize - 5).sp,
-            modifier = Modifier.padding(
-                start = if (self) 0.dp else 14.dp,
-                end = if (self) 6.dp else 0.dp,
-                top = 3.dp,
-                bottom = 5.dp,
-            ),
-        )
+        if (last) {
+            Text(
+                formatTime(msg.time) ?: "",
+                color = TextSecondary,
+                fontSize = (baseSize - 5).sp,
+                modifier = Modifier.padding(
+                    start = if (self) 0.dp else 14.dp,
+                    end = if (self) 6.dp else 0.dp,
+                    top = 3.dp,
+                    bottom = 5.dp,
+                ),
+            )
+        }
     }
 }
 
