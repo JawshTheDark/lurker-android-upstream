@@ -33,6 +33,11 @@ class Prefs(context: Context) {
 
     val hasSession: Boolean get() = !token.isNullOrEmpty() && !serverUrl.isNullOrEmpty()
 
+    /** Selected app theme id ("light" | "dark" | "oled"); null = default. */
+    var theme: String?
+        get() = sp.getString("theme", null)
+        set(value) = sp.edit { putString("theme", value) }
+
     /** Persist a fresh session after a successful token mint. */
     fun saveSession(server: String, username: String, token: String) {
         sp.edit {

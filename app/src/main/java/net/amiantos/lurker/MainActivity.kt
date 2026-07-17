@@ -65,7 +65,9 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -93,8 +95,12 @@ import okio.BufferedSink
 import okio.source
 import net.amiantos.lurker.ui.theme.AccentBlue
 import net.amiantos.lurker.ui.theme.AlertRed
+import net.amiantos.lurker.ui.theme.AppTheme
 import net.amiantos.lurker.ui.theme.CanvasBlack
+import net.amiantos.lurker.ui.theme.GlassBorder
 import net.amiantos.lurker.ui.theme.LurkerTheme
+import net.amiantos.lurker.ui.theme.TextPrimary
+import net.amiantos.lurker.ui.theme.Ui
 import net.amiantos.lurker.ui.theme.NoticeAmber
 import net.amiantos.lurker.ui.theme.OnlineGreen
 import net.amiantos.lurker.ui.theme.PillGray
@@ -124,6 +130,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val prefs = Prefs(this)
+        Ui.theme = AppTheme.from(prefs.theme)
         client.start(prefs)
         consumeShareIntent(intent)
         setContent {
@@ -160,7 +167,7 @@ class MainActivity : ComponentActivity() {
                             screen = Screen.Chat(buffer)
                         },
                     )
-                    Screen.Settings -> SettingsScreen(client) { screen = Screen.Buffers }
+                    Screen.Settings -> SettingsScreen(client, prefs) { screen = Screen.Buffers }
                     Screen.Dcc -> DccScreen(
                         client = client,
                         onOpenBuffer = { buffer ->
@@ -352,6 +359,7 @@ private fun BufferListScreen(
                 Surface(
                     color = SurfaceDark,
                     shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(0.5.dp, GlassBorder),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 ) {
                     Column {
@@ -424,7 +432,7 @@ private fun UnreadBadge(count: Int, highlight: Boolean) {
     ) {
         Text(
             if (count > 999) "999+" else "$count",
-            color = Color.White,
+            color = if (highlight) Color.White else TextPrimary,
             fontSize = 13.sp,
         )
     }
@@ -623,7 +631,10 @@ private fun ChatScreen(
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
+        // consumeWindowInsets stops imePadding from re-adding the bottom system
+        // inset the Scaffold padding already applied — without it the composer
+        // floats a navigation-bar-height above the keyboard.
+        Column(Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize().imePadding()) {
             // Chat text follows the synced look.font.size.mobile setting (web px
             // ~ sp); +2 keeps the historical default (14 -> 16sp).
             val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
@@ -848,7 +859,7 @@ private fun MemberActions(
 private fun SheetAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
     Text(
         label,
-        color = if (danger) AlertRed else Color.White,
+        color = if (danger) AlertRed else TextPrimary,
         fontSize = 16.sp,
         modifier = Modifier
             .fillMaxWidth()
@@ -931,7 +942,7 @@ private fun MessageBubble(msg: Msg, baseSize: Int) {
                 color = when {
                     self -> Color.White
                     msg.type == "notice" -> NoticeAmber
-                    else -> Color.White
+                    else -> TextPrimary
                 },
                 fontSize = baseSize.sp,
             )
@@ -962,7 +973,7 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16) {
     Text(
         line,
         fontSize = (baseSize - 2).sp,
-        color = Color.White,
+        color = TextPrimary,
         modifier = Modifier.fillMaxWidth().padding(16.dp, 5.dp),
     )
 }
@@ -1209,7 +1220,7 @@ private fun FormatKey(
         Text(
             label,
             fontSize = 15.sp,
-            color = Color.White,
+            color = TextPrimary,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
             fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
             fontFamily = if (mono) FontFamily.Monospace else null,
@@ -1258,7 +1269,7 @@ private val GROUP_LABELS = mapOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
+private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Unit) {
     var category by remember { mutableStateOf<String?>(null) }
     BackHandler { if (category != null) category = null else onBack() }
 
@@ -1306,6 +1317,7 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
                     item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
                 }
                 item { Spacer(Modifier.height(8.dp)) }
+                item { ThemePickerCard(prefs) }
                 items(orderedCategories.size) { i ->
                     val cat = orderedCategories[i]
                     val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
@@ -1313,6 +1325,7 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
                     Surface(
                         color = SurfaceDark,
                         shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(0.5.dp, GlassBorder),
                         modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
                     ) {
                         Row(
@@ -1357,6 +1370,7 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
                             Surface(
                                 color = SurfaceDark,
                                 shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(0.5.dp, GlassBorder),
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                             ) {
                                 Column {
@@ -1374,6 +1388,43 @@ private fun SettingsScreen(client: LurkerClient, onBack: () -> Unit) {
                         }
                     }
                     item { Spacer(Modifier.height(24.dp)) }
+                }
+            }
+        }
+    }
+}
+
+/** Local (device-only) look selector — not a server registry setting. */
+@Composable
+private fun ThemePickerCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.padding(16.dp, 12.dp)) {
+            Text("App theme", fontSize = 17.sp)
+            Text("On this device", color = TextSecondary, fontSize = 13.sp)
+            Row(
+                Modifier.fillMaxWidth().padding(top = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppTheme.entries.forEach { t ->
+                    val selected = Ui.theme == t
+                    Text(
+                        t.label,
+                        color = if (selected) AccentBlue else TextSecondary,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .background(
+                                if (selected) SurfaceRaised else Color.Transparent,
+                                RoundedCornerShape(14.dp),
+                            )
+                            .clickable { Ui.theme = t; prefs.theme = t.id }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
                 }
             }
         }
@@ -1531,6 +1582,7 @@ private fun NetworksScreen(
                 Surface(
                     color = SurfaceDark,
                     shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(0.5.dp, GlassBorder),
                     modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp),
                 ) {
                     Column(Modifier.padding(16.dp, 12.dp)) {
@@ -1780,6 +1832,7 @@ private fun DccStartCard(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit) {
     Surface(
         color = SurfaceDark,
         shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
         modifier = Modifier.fillMaxWidth().padding(16.dp, 8.dp),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
