@@ -61,10 +61,14 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.withStyle
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -96,22 +100,28 @@ import net.amiantos.lurker.ui.theme.TextSecondary
 import net.amiantos.lurker.ui.theme.formatTime
 import net.amiantos.lurker.ui.theme.nickColor
 
-/** Where the app is: the buffer list, a chat, settings, or the DCC screen. */
+/** Where the app is: the buffer list, a chat, settings, DCC, or networks. */
 private sealed interface Screen {
     data object Buffers : Screen
     data class Chat(val buffer: Buffer) : Screen
     data object Settings : Screen
     data object Dcc : Screen
+    data object Networks : Screen
+    data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
 
 class MainActivity : ComponentActivity() {
     private val client = LurkerClient()
+
+    /** A file arriving via the system share sheet, waiting for a buffer pick. */
+    private var sharedUri by mutableStateOf<Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val prefs = Prefs(this)
         client.start(prefs)
+        consumeShareIntent(intent)
         setContent {
             LurkerTheme {
                 var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
@@ -124,6 +134,7 @@ class MainActivity : ComponentActivity() {
                 when (val s = screen) {
                     Screen.Buffers -> BufferListScreen(
                         client = client,
+                        sharePending = sharedUri != null,
                         onOpen = { buffer ->
                             client.open(buffer)
                             client.setActive(buffer)
@@ -131,11 +142,14 @@ class MainActivity : ComponentActivity() {
                         },
                         onSettings = { client.loadSettings(); screen = Screen.Settings },
                         onDcc = { client.loadDcc(); screen = Screen.Dcc },
+                        onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
                         onSignOut = { client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
                         client = client,
                         buffer = s.buffer,
+                        sharedUri = sharedUri,
+                        onShareConsumed = { sharedUri = null },
                         onBack = { client.setActive(null); screen = Screen.Buffers },
                         onOpenBuffer = { buffer ->
                             client.setActive(buffer)
@@ -151,8 +165,33 @@ class MainActivity : ComponentActivity() {
                         },
                         onBack = { screen = Screen.Buffers },
                     )
+                    Screen.Networks -> NetworksScreen(
+                        client = client,
+                        onEdit = { screen = Screen.NetworkEdit(it) },
+                        onAdd = { screen = Screen.NetworkEdit(null) },
+                        onBack = { screen = Screen.Buffers },
+                    )
+                    is Screen.NetworkEdit -> NetworkEditScreen(
+                        client = client,
+                        config = s.config,
+                        onBack = { screen = Screen.Networks },
+                    )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        consumeShareIntent(intent)
+    }
+
+    private fun consumeShareIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND) {
+            @Suppress("DEPRECATION")
+            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (uri != null) sharedUri = uri
+            intent.action = null // consume so a config change doesn't replay it
         }
     }
 
@@ -224,9 +263,11 @@ private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
 @Composable
 private fun BufferListScreen(
     client: LurkerClient,
+    sharePending: Boolean,
     onOpen: (Buffer) -> Unit,
     onSettings: () -> Unit,
     onDcc: () -> Unit,
+    onNetworks: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -252,6 +293,7 @@ private fun BufferListScreen(
                         Text("⋯", color = TextSecondary, fontSize = 22.sp)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
                         DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
                         DropdownMenuItem(text = { Text("Sign out") }, onClick = { menuOpen = false; onSignOut() })
@@ -274,6 +316,21 @@ private fun BufferListScreen(
         }
 
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+            if (sharePending) {
+                item {
+                    Text(
+                        "Sharing a file — pick a conversation to attach it to.",
+                        color = AccentBlue,
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp, 8.dp)
+                            .background(SurfaceDark, RoundedCornerShape(10.dp))
+                            .padding(12.dp),
+                    )
+                }
+            }
             items(rows.size) { index ->
                 val section = rows[index]
                 Text(
@@ -429,6 +486,8 @@ private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRo
 private fun ChatScreen(
     client: LurkerClient,
     buffer: Buffer,
+    sharedUri: Uri? = null,
+    onShareConsumed: () -> Unit = {},
     onBack: () -> Unit,
     onOpenBuffer: (Buffer) -> Unit,
 ) {
@@ -440,8 +499,35 @@ private fun ChatScreen(
     val rows = remember(messages, divider) { buildChatRows(messages, divider) }
     val listState = rememberLazyListState()
 
-    // DCC send: remember who we're sending to across the system file picker.
+    // Upload → provider URL → splice into the draft (attach button + share sheet).
     val context = LocalContext.current
+    fun uploadIntoDraft(uri: Uri) {
+        val upload = readUpload(context, uri)
+        if (upload == null) {
+            client.localNotice(buffer, "Couldn't read that file (or it's over ${MAX_DCC_UPLOAD_MB}MB).")
+            return
+        }
+        client.uploadFile(upload.first, upload.second) { url, err ->
+            if (url != null) {
+                val sep = if (draft.text.isEmpty() || draft.text.endsWith(" ")) "" else " "
+                val text = draft.text + sep + url + " "
+                draft = TextFieldValue(text, TextRange(text.length))
+            } else {
+                client.localNotice(buffer, "Upload failed: ${err ?: "unknown error"}")
+            }
+        }
+    }
+    val uploadPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) uploadIntoDraft(uri)
+    }
+    // A share-sheet file lands here once a buffer is chosen.
+    LaunchedEffect(sharedUri) {
+        val uri = sharedUri ?: return@LaunchedEffect
+        onShareConsumed()
+        uploadIntoDraft(uri)
+    }
+
+    // DCC send: remember who we're sending to across the system file picker.
     var dccNick by remember { mutableStateOf<String?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val nick = dccNick
@@ -560,7 +646,13 @@ private fun ChatScreen(
             }
 
             if (!buffer.isSystem) {
-                Composer(draft, { draft = it }, buffer.displayName) {
+                Composer(
+                    draft = draft,
+                    onChange = { draft = it },
+                    target = buffer.displayName,
+                    uploading = client.uploading,
+                    onAttach = { uploadPicker.launch("*/*") },
+                ) {
                     val text = draft.text.trim()
                     if (text.isEmpty()) return@Composer
                     when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
@@ -920,7 +1012,14 @@ private fun applyFormat(v: TextFieldValue, code: String, end: String = code): Te
 }
 
 @Composable
-private fun Composer(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit, target: String, onSend: () -> Unit) {
+private fun Composer(
+    draft: TextFieldValue,
+    onChange: (TextFieldValue) -> Unit,
+    target: String,
+    uploading: Boolean = false,
+    onAttach: (() -> Unit)? = null,
+    onSend: () -> Unit,
+) {
     var showFormat by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         if (showFormat) FormatBar(draft, onChange)
@@ -928,6 +1027,15 @@ private fun Composer(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit, 
             Modifier.fillMaxWidth().padding(10.dp, 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (onAttach != null) {
+                TextButton(onClick = onAttach, enabled = !uploading) {
+                    Text(
+                        if (uploading) "…" else "+",
+                        color = if (uploading) TextSecondary else AccentBlue,
+                        fontSize = 22.sp,
+                    )
+                }
+            }
             TextButton(onClick = { showFormat = !showFormat }) {
                 Text(
                     "Aa",
@@ -1350,6 +1458,228 @@ private fun EditableSetting(
             imeAction = ImeAction.Done,
         ),
         keyboardActions = KeyboardActions(onDone = { onCommit(text) }),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+// ---- Networks --------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NetworksScreen(
+    client: LurkerClient,
+    onEdit: (NetworkConfig) -> Unit,
+    onAdd: () -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text("Networks", fontWeight = FontWeight.SemiBold) },
+                actions = {
+                    TextButton(onClick = onAdd) { Text("+", color = AccentBlue, fontSize = 24.sp) }
+                },
+            )
+        },
+    ) { padding ->
+        LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+            client.networksError?.let { err ->
+                item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
+            }
+            if (client.networkConfigs.isEmpty()) {
+                item { Text("No networks yet — add one with +.", Modifier.padding(16.dp), color = TextSecondary) }
+            }
+            items(client.networkConfigs.size) { i ->
+                val cfg = client.networkConfigs[i]
+                val live = client.networks[cfg.id]
+                val connected = live?.connected == true
+                Surface(
+                    color = SurfaceDark,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp),
+                ) {
+                    Column(Modifier.padding(16.dp, 12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ConnectionDot(connected)
+                            Spacer(Modifier.width(8.dp))
+                            Text(cfg.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { onEdit(cfg) }) { Text("Edit", color = AccentBlue) }
+                        }
+                        Text(
+                            "${cfg.host}:${cfg.port}${if (cfg.tls) " (TLS)" else ""} · ${live?.nick ?: cfg.nick}" +
+                                if (cfg.blocked) " · blocked by server policy" else "",
+                            color = if (cfg.blocked) AlertRed else TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                        Row {
+                            if (connected) {
+                                TextButton(onClick = { client.networkAction(cfg.id, "disconnect") }) {
+                                    Text("Disconnect", color = AlertRed, fontSize = 13.sp)
+                                }
+                                TextButton(onClick = { client.networkAction(cfg.id, "reconnect") }) {
+                                    Text("Reconnect", color = TextSecondary, fontSize = 13.sp)
+                                }
+                            } else {
+                                TextButton(
+                                    onClick = { client.networkAction(cfg.id, "connect") },
+                                    enabled = !cfg.blocked,
+                                ) { Text("Connect", color = if (cfg.blocked) TextSecondary else OnlineGreen, fontSize = 13.sp) }
+                            }
+                        }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NetworkEditScreen(client: LurkerClient, config: NetworkConfig?, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    var name by remember { mutableStateOf(config?.name ?: "") }
+    var host by remember { mutableStateOf(config?.host ?: "") }
+    var port by remember { mutableStateOf((config?.port ?: 6697).toString()) }
+    var tls by remember { mutableStateOf(config?.tls ?: true) }
+    var nick by remember { mutableStateOf(config?.nick ?: "") }
+    var username by remember { mutableStateOf(config?.username ?: "") }
+    var realname by remember { mutableStateOf(config?.realname ?: "") }
+    var serverPassword by remember { mutableStateOf("") }
+    var saslAccount by remember { mutableStateOf(config?.saslAccount ?: "") }
+    var saslPassword by remember { mutableStateOf("") }
+    var channels by remember { mutableStateOf("") }
+    var autoconnect by remember { mutableStateOf(config?.autoconnect ?: true) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text(config?.name ?: "Add network", fontWeight = FontWeight.SemiBold) },
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier.padding(padding).padding(16.dp).fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            error?.let { Text(it, color = AlertRed, fontSize = 13.sp) }
+            FormField("Name", name) { name = it }
+            FormField("Host", host) { host = it }
+            FormField("Port", port, number = true) { port = it }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("TLS")
+                Switch(checked = tls, onCheckedChange = { tls = it })
+            }
+            FormField("Nick", nick) { nick = it }
+            FormField("Username (ident) — optional", username) { username = it }
+            FormField("Real name — optional", realname) { realname = it }
+            FormField(
+                if (config?.hasPassword == true) "Server password (set — leave blank to keep)"
+                else "Server password — optional",
+                serverPassword, secret = true,
+            ) { serverPassword = it }
+            FormField("SASL account — optional", saslAccount) { saslAccount = it }
+            FormField(
+                if (config?.hasSaslPassword == true) "SASL password (set — leave blank to keep)"
+                else "SASL password — optional",
+                saslPassword, secret = true,
+            ) { saslPassword = it }
+            if (config == null) {
+                FormField("Channels to join — optional (#a, #b)", channels) { channels = it }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Connect automatically")
+                Switch(checked = autoconnect, onCheckedChange = { autoconnect = it })
+            }
+            Button(
+                onClick = {
+                    saving = true
+                    val fields = buildMap<String, Any?> {
+                        put("name", name.trim())
+                        put("host", host.trim())
+                        put("port", port.toIntOrNull() ?: 6697)
+                        put("tls", tls)
+                        put("nick", nick.trim())
+                        if (username.isNotBlank()) put("username", username.trim())
+                        if (realname.isNotBlank()) put("realname", realname.trim())
+                        if (serverPassword.isNotEmpty()) put("server_password", serverPassword)
+                        if (saslAccount.isNotBlank()) put("sasl_account", saslAccount.trim())
+                        if (saslPassword.isNotEmpty()) put("sasl_password", saslPassword)
+                        if (config == null && channels.isNotBlank()) put("default_channel", channels)
+                        put("autoconnect", autoconnect)
+                    }
+                    client.saveNetwork(config?.id, fields) { err ->
+                        saving = false
+                        if (err == null) onBack() else error = err
+                    }
+                },
+                enabled = !saving && name.isNotBlank() && host.isNotBlank() && nick.isNotBlank(),
+            ) { Text(if (config == null) "Save & connect" else "Save") }
+
+            if (config != null) {
+                TextButton(onClick = {
+                    if (!confirmDelete) {
+                        confirmDelete = true
+                    } else {
+                        client.deleteNetwork(config.id) { err ->
+                            if (err == null) onBack() else error = err
+                        }
+                    }
+                }) {
+                    Text(
+                        if (confirmDelete) "Tap again to permanently delete" else "Delete network",
+                        color = AlertRed,
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun FormField(
+    label: String,
+    value: String,
+    number: Boolean = false,
+    secret: Boolean = false,
+    onChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        singleLine = true,
+        visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = if (number) KeyboardType.Number else KeyboardType.Text,
+        ),
         modifier = Modifier.fillMaxWidth(),
     )
 }

@@ -103,6 +103,26 @@ data class Member(
 }
 
 /**
+ * A network row as `/api/networks` REST returns it (config, not live state —
+ * live connected/nick state rides the WS snapshot into [LurkerClient.networks]).
+ */
+data class NetworkConfig(
+    val id: Int,
+    val name: String,
+    val host: String,
+    val port: Int,
+    val tls: Boolean,
+    val nick: String,
+    val username: String?,
+    val realname: String?,
+    val autoconnect: Boolean,
+    val hasPassword: Boolean,
+    val hasSaslPassword: Boolean,
+    val saslAccount: String?,
+    val blocked: Boolean,
+)
+
+/**
  * One entry from the settings registry (`/api/settings/bootstrap`). The screen
  * renders generically off [type], so the whole registry is editable without the
  * client hard-coding any particular key.

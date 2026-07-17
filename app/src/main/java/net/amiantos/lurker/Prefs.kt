@@ -42,7 +42,7 @@ class Prefs(context: Context) {
         }
     }
 
-    /** Drop the token (and username) on sign-out; keep the server URL for convenience. */
+    /** Drop only the token on sign-out; server URL and username prefill re-login. */
     fun clearSession() {
         sp.edit { remove(KEY_TOKEN) }
     }

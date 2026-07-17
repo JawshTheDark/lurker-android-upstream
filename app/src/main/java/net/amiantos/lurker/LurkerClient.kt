@@ -265,8 +265,10 @@ class LurkerClient {
         intentionalClose = false
         connecting = true
         ws?.cancel()
-        val wsBase = baseUrl.replaceFirst("http", "ws") + "/ws"
-        val wsUrl = if (since != null && since > 0) "$wsBase?since=$since" else wsBase
+        // ?v= announces the protocol we speak (#569); the server 426s a client
+        // older than its minimum instead of feeding it frames it would mis-render.
+        val wsBase = baseUrl.replaceFirst("http", "ws") + "/ws?v=$PROTOCOL_VERSION"
+        val wsUrl = if (since != null && since > 0) "$wsBase&since=$since" else wsBase
         val req = Request.Builder()
             .url(wsUrl)
             .header("Authorization", "Bearer ${token!!}")
@@ -299,6 +301,10 @@ class LurkerClient {
                     if (code == 401) {
                         status = "Session expired — please sign in again."
                         forceSignOutLocally()
+                    } else if (code == 426) {
+                        // Protocol handshake refused: this build is older than the
+                        // server's minimum. Retrying can't help — say so legibly.
+                        status = "This app is too old for the server — please update the app."
                     } else {
                         status = if (code != null) "Reconnecting… (HTTP $code)" else "Reconnecting…"
                         scheduleReconnect()
@@ -815,6 +821,146 @@ class LurkerClient {
         }
     }
 
+    // ---- Uploads ------------------------------------------------------------
+
+    var uploading by mutableStateOf(false)
+
+    /**
+     * Upload a file through the account's configured provider (Zipline/Chibisafe/
+     * local/…) and hand back its public URL. Multipart field is `image` for
+     * historical reasons — any file type goes through it.
+     */
+    fun uploadFile(filename: String, bytes: ByteArray, onDone: (String?, String?) -> Unit) {
+        post { uploading = true }
+        io.execute {
+            try {
+                val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+                    .addFormDataPart(
+                        "image", filename,
+                        bytes.toRequestBody("application/octet-stream".toMediaType()),
+                    )
+                    .build()
+                http.newCall(authed("/api/uploads").post(body).build()).execute().use { res ->
+                    val text = res.body?.string().orEmpty()
+                    if (!res.isSuccessful) {
+                        val err = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                        post { uploading = false; onDone(null, err?.ifEmpty { null } ?: "upload failed (HTTP ${res.code})") }
+                        return@execute
+                    }
+                    val url = JSONObject(text).optString("url")
+                    post { uploading = false; onDone(url.ifEmpty { null }, null) }
+                }
+            } catch (e: Exception) {
+                post { uploading = false; onDone(null, "upload failed: ${e.message}") }
+            }
+        }
+    }
+
+    // ---- Network management (REST) ------------------------------------------
+
+    val networkConfigs = mutableStateListOf<NetworkConfig>()
+    var networksError by mutableStateOf<String?>(null)
+
+    fun loadNetworkConfigs() = io.execute {
+        try {
+            http.newCall(authed("/api/networks").build()).execute().use { res ->
+                if (!res.isSuccessful) {
+                    post { networksError = "Failed to load networks (HTTP ${res.code})" }
+                    return@execute
+                }
+                val arr = JSONObject(res.body?.string().orEmpty()).optJSONArray("networks")
+                val parsed = mutableListOf<NetworkConfig>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    parseNetworkConfig(arr.optJSONObject(i) ?: continue)?.let(parsed::add)
+                }
+                post {
+                    networksError = null
+                    networkConfigs.clear()
+                    networkConfigs.addAll(parsed)
+                }
+            }
+        } catch (e: Exception) {
+            post { networksError = "Failed to load networks: ${e.message}" }
+        }
+    }
+
+    private fun parseNetworkConfig(o: JSONObject): NetworkConfig? {
+        val id = o.optInt("id", -1)
+        if (id < 0) return null
+        return NetworkConfig(
+            id = id,
+            name = o.optString("name"),
+            host = o.optString("host"),
+            port = o.optInt("port", 6697),
+            tls = o.optBoolean("tls", true),
+            nick = o.optString("nick"),
+            username = o.optString("username").ifEmpty { null },
+            realname = o.optString("realname").ifEmpty { null },
+            autoconnect = o.optBoolean("autoconnect", false),
+            hasPassword = o.optBoolean("has_password", false),
+            hasSaslPassword = o.optBoolean("has_sasl_password", false),
+            saslAccount = o.optString("sasl_account").ifEmpty { null },
+            blocked = o.optBoolean("blocked", false),
+        )
+    }
+
+    /** Create (id == null) or update (id != null) a network; refreshes the list. */
+    fun saveNetwork(id: Int?, fields: Map<String, Any?>, onDone: (String?) -> Unit) = io.execute {
+        try {
+            val payload = JSONObject()
+            for ((k, v) in fields) if (v != null) payload.put(k, v)
+            val body = payload.toString().toRequestBody(json)
+            val req = if (id == null) {
+                authed("/api/networks").post(body)
+            } else {
+                authed("/api/networks/$id").patch(body)
+            }.build()
+            http.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) {
+                    val err = runCatching {
+                        JSONObject(res.body?.string().orEmpty()).optString("error")
+                    }.getOrNull()
+                    post { onDone(err?.ifEmpty { null } ?: "save failed (HTTP ${res.code})") }
+                    return@execute
+                }
+                loadNetworkConfigs()
+                post { onDone(null) }
+            }
+        } catch (e: Exception) {
+            post { onDone("save failed: ${e.message}") }
+        }
+    }
+
+    fun deleteNetwork(id: Int, onDone: (String?) -> Unit) = io.execute {
+        try {
+            http.newCall(authed("/api/networks/$id").delete().build()).execute().use { res ->
+                if (!res.isSuccessful) {
+                    post { onDone("delete failed (HTTP ${res.code})") }
+                    return@execute
+                }
+                loadNetworkConfigs()
+                post { onDone(null) }
+            }
+        } catch (e: Exception) {
+            post { onDone("delete failed: ${e.message}") }
+        }
+    }
+
+    /** connect | disconnect | reconnect. Live state lands via the WS snapshot. */
+    fun networkAction(id: Int, action: String) = io.execute {
+        try {
+            http.newCall(
+                authed("/api/networks/$id/$action").post(ByteArray(0).toRequestBody(null)).build(),
+            ).execute().use { res ->
+                if (!res.isSuccessful) {
+                    post { networksError = "$action failed (HTTP ${res.code})" }
+                }
+            }
+        } catch (e: Exception) {
+            post { networksError = "$action failed: ${e.message}" }
+        }
+    }
+
     // ---- DCC (receive) ----------------------------------------------------
 
     fun loadDcc() = io.execute {
@@ -1032,6 +1178,7 @@ class LurkerClient {
     }
 
     private companion object {
+        const val PROTOCOL_VERSION = 1 // mirror server/protocol.ts
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 30_000L
         const val SEND_ACK_TIMEOUT = 8_000L // matches the web client's deadline
