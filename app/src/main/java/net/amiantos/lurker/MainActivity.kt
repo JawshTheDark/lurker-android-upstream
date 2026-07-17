@@ -123,6 +123,9 @@ import net.amiantos.lurker.ui.theme.TextSecondary
 import net.amiantos.lurker.ui.theme.formatTime
 import net.amiantos.lurker.ui.theme.nickColor
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -394,7 +397,11 @@ private fun BufferListBody(
 ) {
     LazyColumn(
         Modifier.fillMaxSize().hazeSource(hazeState),
-        contentPadding = PaddingValues(top = topPadding + 4.dp),
+        contentPadding = PaddingValues(
+            top = topPadding + 4.dp,
+            // Edge-to-edge list: keep the last rows above the navigation bar.
+            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
+        ),
     ) {
             if (sharePending) {
                 item {
@@ -730,7 +737,13 @@ private fun ChatScreen(
             modifier = Modifier.fillMaxSize().hazeSource(hazeState),
             contentPadding = PaddingValues(
                 top = with(density) { topBarHeightPx.toDp() } + 4.dp,
-                bottom = with(density) { bottomBarHeightPx.toDp() } + 6.dp,
+                // Composer overlay height when present (it already includes the
+                // nav-bar inset); bare nav-bar inset otherwise (:system: has no
+                // composer and its lines were sliding under the task bar).
+                bottom = maxOf(
+                    with(density) { bottomBarHeightPx.toDp() },
+                    WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+                ) + 6.dp,
             ),
         ) {
             if (showLoadOlder) {
