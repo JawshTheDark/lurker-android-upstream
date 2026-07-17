@@ -1,5 +1,7 @@
 [versions]
-agp = "9.3.0"
+# 9.2.1, not 9.3.0: stable Android Studio (2026.1.1 / Quail 1) refuses to sync
+# projects on an AGP newer than it supports. The CLI build accepts either.
+agp = "9.2.1"
 coreKtx = "1.10.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"

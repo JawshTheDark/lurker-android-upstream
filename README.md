@@ -3,10 +3,12 @@
 A native Android client for [Lurker](https://github.com/amiantos/lurker), an IRC client with a
 server that stays connected for you.
 
-> **Status: prototype.** This is a spike, not the app. It exists to prove that Lurker's WebSocket +
-> REST contract can be driven from a native client, and it does exactly enough to demonstrate that:
-> sign in, list buffers, read a channel, send a message. Nothing else. See
-> [Scope](#what-this-does-and-doesnt-do) before you get excited.
+> **Status: early client.** Born as a spike to prove Lurker's WebSocket + REST contract can be driven
+> from a native client — that part is done — and since grown into something usable day to day: it
+> stays signed in, survives network drops, renders formatted chat, and handles slash-commands,
+> settings, and DCC transfers. It is still built around a single source of truth rather than the
+> layered architecture the real app ([lurker#492](https://github.com/amiantos/lurker/issues/492))
+> calls for. See [Scope](#what-this-does-and-doesnt-do).
 
 ## What it proves
 
@@ -29,20 +31,46 @@ already carries, just handed to the app in a response body instead of a `Set-Coo
 
 ## What this does (and doesn't) do
 
-**Does:** sign in with a password · open the WebSocket · list buffers · open a channel and read its
-backlog · send a message · render live incoming messages.
+**Does:**
 
-**Doesn't:** persist anything (state dies with the process, including your token — you sign in every
-launch) · reconnect or resume (`?since=`) · sort or group the buffer list · show unread badges,
-member lists, DMs-as-first-class, uploads, search, highlights, settings, or push · parse mIRC colors
-or link URLs · handle `/commands` · render joins, parts, quits, modes, or topics.
+- **Stays signed in.** The bearer session is saved to app-private storage, so the app reconnects
+  silently on launch. Sign out clears it (and best-effort revokes it server-side).
+- **Survives drops.** The socket auto-reconnects with exponential backoff, and on return from the
+  background it resumes with `?since=<lastId>` so you don't miss messages. A dead token (401) bounces
+  you to the sign-in screen instead of spinning.
+- **Reads naturally.** Renders mIRC colors and text formatting (bold/italic/underline/mono), makes
+  URLs tappable, and shows joins / parts / quits / nick changes / kicks / modes / topics as inline
+  system lines.
+- **Buffer list that scales.** Grouped by network, DMs after channels, buffers with activity floated
+  to the top, with unread and highlight badges. Opening a buffer clears its badge and marks it read.
+- **Slash-commands.** `/me`, `/msg`, `/query`, `/join`, `/part`, `/nick`, `/topic`, `/kick`, `/mode`,
+  `/op`, `/ban`, `/whois`, `/away`, `/ctcp`, `/slap`, `/cycle`, `/raw`, … (`/help` lists them). The
+  handful with special wire semantics map to structured socket messages; the rest lower to a `raw`
+  IRC line. `//` sends a literal leading slash.
+- **Settings.** A registry-driven editor over `/api/settings` — every server-advertised setting is
+  editable by type (toggle, number, choice, text) with no per-key hard-coding.
+- **DCC receive.** Lists transfers, accept / reject / cancel, with live progress from `dcc-transfer`
+  frames.
 
-The architecture is throwaway on purpose: no ViewModel, no local store, no repository layer. All the
-wire handling is in one file, [`LurkerClient.kt`](app/src/main/java/net/amiantos/lurker/LurkerClient.kt),
-and the three screens are in [`MainActivity.kt`](app/src/main/java/net/amiantos/lurker/MainActivity.kt).
-The real app ([lurker#492](https://github.com/amiantos/lurker/issues/492)) is meant to be built around
-one internal model with a transport-adapter seam, so the UI never knows whether it's talking to a
-self-hosted Lurker, the hosted service, or IRC directly. None of that is here.
+**Doesn't (yet):** member lists · uploads · message search · highlight-rule editing · push
+notifications · passkey sign-in (the token mint is password-only) · **DCC send & chat** — the server
+engine for those lives on a branch that isn't wired or deployed, so that surface is scaffolded and
+disabled until the API ships.
+
+The code is still one source of truth, not a layered architecture. Transport and observable state
+live in [`LurkerClient.kt`](app/src/main/java/net/amiantos/lurker/LurkerClient.kt); the pure,
+unit-tested logic is split out into [`Mirc.kt`](app/src/main/java/net/amiantos/lurker/Mirc.kt) and
+[`Commands.kt`](app/src/main/java/net/amiantos/lurker/Commands.kt); the screens are in
+[`MainActivity.kt`](app/src/main/java/net/amiantos/lurker/MainActivity.kt). The real app
+([lurker#492](https://github.com/amiantos/lurker/issues/492)) is still meant to be rebuilt around one
+internal model with a transport-adapter seam; this is the well-worn stepping stone, not that.
+
+## A note on token storage
+
+The saved bearer *is* your session — treat it like a password. It lives in app-private
+SharedPreferences, unreadable by other apps on a non-rooted device, but it is **not** encrypted at
+rest. Moving it into `EncryptedSharedPreferences` / the Android Keystore is the obvious next
+hardening step and is the reason cleartext HTTP (below) must not survive into a shipping build.
 
 ## Running it
 

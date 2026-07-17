@@ -1,0 +1,232 @@
+// Copyright (c) 2026 Brad Root
+// SPDX-License-Identifier: MPL-2.0
+
+package net.amiantos.lurker
+
+/**
+ * Slash-command parsing for the composer.
+ *
+ * The Lurker server accepts a small set of structured socket messages (`send`,
+ * `action`, `notice`, `join`, `part`, `raw`, ...) and does the IRC translation
+ * itself. Rather than teach the server a new dialect, this parser turns what the
+ * user types into those existing wire ops — mapping the handful of commands with
+ * special semantics (`/me`, `/msg`, `/join`, `/part`) explicitly and lowering
+ * everything else to a `raw` IRC line, which is the most compatible path.
+ *
+ * Pure and free of Android types so the mapping is unit-tested on the JVM;
+ * LurkerClient owns turning a [WireOp] into an actual socket frame.
+ */
+
+/** One thing to put on the wire. Fields not relevant to [type] are null. */
+data class WireOp(
+    val type: String, // send | action | notice | raw | join | part | clear | close
+    val target: String? = null, // null = current buffer target
+    val text: String? = null,
+    val line: String? = null,
+    val channel: String? = null,
+    val reason: String? = null,
+)
+
+sealed interface ParsedInput {
+    /** Ops to send. [openTarget] asks the UI to focus/open that buffer first. */
+    data class Ops(val ops: List<WireOp>, val openTarget: String? = null) : ParsedInput
+    /** A locally-rendered line (help text, or a usage error). */
+    data class Local(val message: String, val isError: Boolean) : ParsedInput
+}
+
+object Commands {
+    private val EMPTY = ParsedInput.Ops(emptyList())
+    private const val SLAP = "slaps %s around a bit with a large trout"
+
+    fun isChannel(target: String): Boolean =
+        target.isNotEmpty() && target[0] in "#&+!"
+
+    fun parse(input: String, currentTarget: String, hasNetwork: Boolean): ParsedInput {
+        val line = input.trimEnd()
+        if (line.isEmpty()) return EMPTY
+
+        // Plain text, or "//..." literal that happens to start with a slash.
+        if (!line.startsWith("/") || line.startsWith("//")) {
+            val body = if (line.startsWith("//")) line.substring(1) else line
+            return ParsedInput.Ops(listOf(WireOp("send", text = body)))
+        }
+
+        val space = line.indexOf(' ')
+        val verb = (if (space == -1) line.substring(1) else line.substring(1, space)).lowercase()
+        val rest = if (space == -1) "" else line.substring(space + 1).trim()
+
+        // Commands that touch a network need one. `/help` is the only exception.
+        if (verb != "help" && verb != "commands" && !hasNetwork) {
+            return ParsedInput.Local("This buffer has no network.", isError = true)
+        }
+
+        fun raw(l: String) = ParsedInput.Ops(listOf(WireOp("raw", line = l)))
+        fun err(msg: String) = ParsedInput.Local(msg, isError = true)
+
+        return when (verb) {
+            "help", "commands" -> ParsedInput.Local(HELP, isError = false)
+
+            "me", "action" ->
+                if (rest.isEmpty()) err("Usage: /me <action>")
+                else ParsedInput.Ops(listOf(WireOp("action", text = rest)))
+
+            "msg", "m" -> {
+                val (who, body) = splitTargetAndBody(rest) ?: return err("Usage: /msg <target> <message>")
+                ParsedInput.Ops(listOf(WireOp("send", target = who, text = body)))
+            }
+
+            "query", "q" -> {
+                val (who, body) = splitTargetAndBody(rest) ?: run {
+                    if (rest.isBlank()) return err("Usage: /query <nick> [message]")
+                    return ParsedInput.Ops(emptyList(), openTarget = rest.trim())
+                }
+                ParsedInput.Ops(listOf(WireOp("send", target = who, text = body)), openTarget = who)
+            }
+
+            "notice" -> {
+                val (who, body) = splitTargetAndBody(rest) ?: return err("Usage: /notice <target> <message>")
+                ParsedInput.Ops(listOf(WireOp("notice", target = who, text = body)))
+            }
+
+            "join", "j" -> {
+                if (rest.isEmpty()) return err("Usage: /join <#channel> [key]")
+                val parts = rest.split(Regex("\\s+"), limit = 2)
+                val chan = normalizeChannel(parts[0])
+                // A key can't ride the structured join op, so fall to raw for that.
+                if (parts.size == 2) raw("JOIN $chan ${parts[1]}")
+                else ParsedInput.Ops(listOf(WireOp("join", channel = chan)), openTarget = chan)
+            }
+
+            "part", "leave" -> {
+                val parts = if (rest.isEmpty()) emptyList() else rest.split(Regex("\\s+"), limit = 2)
+                val chan = parts.getOrNull(0)?.takeIf { isChannel(it) }?.let { normalizeChannel(it) }
+                    ?: currentTarget
+                val reason = when {
+                    parts.isEmpty() -> null
+                    isChannel(parts[0]) -> parts.getOrNull(1)
+                    else -> rest
+                }
+                ParsedInput.Ops(listOf(WireOp("part", channel = chan, reason = reason)))
+            }
+
+            "close" -> ParsedInput.Ops(listOf(WireOp("close", target = currentTarget)))
+            "clear" -> ParsedInput.Ops(listOf(WireOp("clear", target = currentTarget)))
+
+            "nick" ->
+                if (rest.isEmpty()) err("Usage: /nick <newnick>") else raw("NICK $rest")
+
+            "topic" -> {
+                val (chan, text) = channelAndRest(rest, currentTarget)
+                if (text.isEmpty()) raw("TOPIC $chan") else raw("TOPIC $chan :$text")
+            }
+
+            "kick" -> {
+                if (rest.isEmpty()) return err("Usage: /kick <nick> [reason]")
+                val (chan, tail) = channelAndRest(rest, currentTarget)
+                val bits = tail.split(Regex("\\s+"), limit = 2)
+                val who = bits.getOrNull(0).orEmpty()
+                if (who.isEmpty()) return err("Usage: /kick <nick> [reason]")
+                val reason = bits.getOrNull(1)
+                raw(if (reason != null) "KICK $chan $who :$reason" else "KICK $chan $who")
+            }
+
+            "invite" -> {
+                val bits = rest.split(Regex("\\s+"))
+                if (bits.isEmpty() || bits[0].isEmpty()) return err("Usage: /invite <nick> [#channel]")
+                val chan = bits.getOrNull(1)?.let { normalizeChannel(it) } ?: currentTarget
+                raw("INVITE ${bits[0]} $chan")
+            }
+
+            "mode" -> if (rest.isEmpty()) err("Usage: /mode <target> <flags>") else raw("MODE $rest")
+
+            "op" -> modeForNicks(rest, currentTarget, "+o") ?: err("Usage: /op <nick...>")
+            "deop" -> modeForNicks(rest, currentTarget, "-o") ?: err("Usage: /deop <nick...>")
+            "voice" -> modeForNicks(rest, currentTarget, "+v") ?: err("Usage: /voice <nick...>")
+            "devoice" -> modeForNicks(rest, currentTarget, "-v") ?: err("Usage: /devoice <nick...>")
+            "halfop" -> modeForNicks(rest, currentTarget, "+h") ?: err("Usage: /halfop <nick...>")
+            "dehalfop" -> modeForNicks(rest, currentTarget, "-h") ?: err("Usage: /dehalfop <nick...>")
+            "ban" -> modeForNicks(rest, currentTarget, "+b") ?: err("Usage: /ban <mask...>")
+            "unban" -> modeForNicks(rest, currentTarget, "-b") ?: err("Usage: /unban <mask...>")
+
+            "whois" -> if (rest.isEmpty()) err("Usage: /whois <nick>") else raw("WHOIS $rest")
+            "whowas" -> if (rest.isEmpty()) err("Usage: /whowas <nick>") else raw("WHOWAS $rest")
+
+            "raw", "quote" -> if (rest.isEmpty()) err("Usage: /raw <line>") else raw(rest)
+
+            "ns", "nickserv" -> if (rest.isEmpty()) err("Usage: /ns <command>") else raw("PRIVMSG NickServ :$rest")
+            "cs", "chanserv" -> if (rest.isEmpty()) err("Usage: /cs <command>") else raw("PRIVMSG ChanServ :$rest")
+            "ms", "memoserv" -> if (rest.isEmpty()) err("Usage: /ms <command>") else raw("PRIVMSG MemoServ :$rest")
+
+            "away" -> if (rest.isEmpty()) raw("AWAY") else raw("AWAY :$rest")
+            "back" -> raw("AWAY")
+
+            "ctcp" -> {
+                val (who, body) = splitTargetAndBody(rest) ?: return err("Usage: /ctcp <nick> <TYPE> [args]")
+                raw("PRIVMSG $who :${body.uppercase()}")
+            }
+            "ping" -> if (rest.isEmpty()) err("Usage: /ping <nick>") else raw("PRIVMSG $rest :PING")
+
+            "slap" -> if (rest.isEmpty()) err("Usage: /slap <nick>")
+                else ParsedInput.Ops(listOf(WireOp("action", text = SLAP.format(rest))))
+
+            "quit" -> raw(if (rest.isEmpty()) "QUIT" else "QUIT :$rest")
+
+            "cycle", "hop" -> {
+                if (!isChannel(currentTarget)) return err("/cycle only works in a channel.")
+                ParsedInput.Ops(
+                    listOf(
+                        WireOp("part", channel = currentTarget, reason = rest.ifEmpty { null }),
+                        WireOp("join", channel = currentTarget),
+                    ),
+                    openTarget = currentTarget,
+                )
+            }
+
+            else -> err("Unknown command: /$verb  (try /help, or /raw to send it literally)")
+        }
+    }
+
+    /** Split "target rest of message" into (target, body); null if no body. */
+    private fun splitTargetAndBody(s: String): Pair<String, String>? {
+        val i = s.indexOf(' ')
+        if (i == -1) return null
+        val target = s.substring(0, i).trim()
+        val body = s.substring(i + 1).trim()
+        if (target.isEmpty() || body.isEmpty()) return null
+        return target to body
+    }
+
+    /** If [s] begins with a channel token, peel it off; else use [fallback]. */
+    private fun channelAndRest(s: String, fallback: String): Pair<String, String> {
+        val i = s.indexOf(' ')
+        val first = if (i == -1) s else s.substring(0, i)
+        return if (isChannel(first)) {
+            normalizeChannel(first) to (if (i == -1) "" else s.substring(i + 1).trim())
+        } else {
+            fallback to s
+        }
+    }
+
+    private fun modeForNicks(s: String, currentTarget: String, flag: String): ParsedInput? {
+        val (chan, tail) = channelAndRest(s, currentTarget)
+        val nicks = tail.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (nicks.isEmpty()) return null
+        val sign = flag[0]
+        val letter = flag.substring(1)
+        val flags = sign + letter.repeat(nicks.size)
+        return ParsedInput.Ops(listOf(WireOp("raw", line = "MODE $chan $flags ${nicks.joinToString(" ")}")))
+    }
+
+    private fun normalizeChannel(name: String): String =
+        if (isChannel(name)) name else "#$name"
+
+    private val HELP = buildString {
+        appendLine("Commands:")
+        appendLine("/me, /msg, /query, /notice, /join, /part, /close, /clear")
+        appendLine("/nick, /topic, /kick, /invite, /mode, /whois")
+        appendLine("/op, /deop, /voice, /devoice, /ban, /unban")
+        appendLine("/away, /back, /ctcp, /ping, /slap, /cycle, /quit")
+        appendLine("/ns, /cs, /ms, /raw <line>")
+        append("Prefix a literal slash with // to send it as a message.")
+    }
+}
