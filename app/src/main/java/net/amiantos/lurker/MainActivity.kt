@@ -806,6 +806,21 @@ private fun ActionLine(msg: Msg) {
 
 @Composable
 private fun SystemLine(msg: Msg) {
+    if (msg.type == "whois") {
+        // WHOIS blocks read like terminal output: left-aligned, monospace.
+        Text(
+            msg.text,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            color = TextSecondary,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp)
+                .background(SurfaceDark, RoundedCornerShape(8.dp))
+                .padding(12.dp, 8.dp),
+        )
+        return
+    }
     Text(
         msg.text,
         fontSize = 12.sp,

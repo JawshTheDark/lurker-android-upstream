@@ -341,6 +341,12 @@ class LurkerClient {
 
             "irc" -> {
                 val networkId = if (frame.isNull("networkId")) null else frame.getInt("networkId")
+                // WHOIS replies are ephemeral and targetless (the web renders a
+                // modal); we print them into the buffer they were issued from.
+                if (frame.optString("type") == "whois_result") {
+                    handleWhoisResult(frame)
+                    return
+                }
                 val target = frame.optString("target")
                 if (target.isEmpty()) return
                 bumpCursor(frame.optLong("id"))
@@ -451,6 +457,60 @@ class LurkerClient {
                 members[key] = cur.map { if (it.nick.equals(from, true)) it.copy(nick = to) else it }
             }
             "channel-parted" -> members.remove(key)
+        }
+    }
+
+    /** Render a whois_result into the currently focused buffer as a block. */
+    private fun handleWhoisResult(frame: JSONObject) {
+        val key = activeKey ?: return
+        val w = frame.optJSONObject("whois") ?: return
+        val msg = Msg(
+            id = 0,
+            type = "whois",
+            nick = "",
+            text = formatWhois(w),
+            self = false,
+            time = frame.optString("time").ifEmpty { null },
+            system = true,
+        )
+        mergeInto(key, listOf(msg), replace = false)
+    }
+
+    private fun formatWhois(w: JSONObject): String = buildString {
+        val nick = w.optString("nick", "?")
+        if (w.optString("error") == "not_found") {
+            append("WHOIS $nick — no such nick")
+            return@buildString
+        }
+        append("WHOIS $nick")
+        val ident = w.optString("ident")
+        val host = w.optString("hostname")
+        if (ident.isNotEmpty() || host.isNotEmpty()) append(" ($ident@$host)")
+        w.optString("real_name").takeIf { it.isNotEmpty() }?.let { append("\nname      $it") }
+        w.optString("account").takeIf { it.isNotEmpty() }?.let { append("\naccount   $it") }
+        w.optString("server").takeIf { it.isNotEmpty() }?.let {
+            append("\nserver    $it")
+            w.optString("server_info").takeIf { s -> s.isNotEmpty() }?.let { s -> append(" ($s)") }
+        }
+        w.optString("channels").takeIf { it.isNotEmpty() }?.let { append("\nchannels  $it") }
+        val idle = w.optLong("idle", -1)
+        if (idle >= 0) append("\nidle      ${formatIdle(idle)}")
+        w.optString("away").takeIf { it.isNotEmpty() }?.let { append("\naway      $it") }
+        val actual = listOf(w.optString("actual_hostname"), w.optString("actual_ip"))
+            .filter { it.isNotEmpty() }.distinct()
+        if (actual.isNotEmpty()) append("\nactually  ${actual.joinToString(" ")}")
+        if (w.optBoolean("secure")) append("\nsecure connection")
+        if (w.optBoolean("operator")) append("\nIRC operator")
+    }
+
+    private fun formatIdle(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return when {
+            h > 0 -> "${h}h ${m}m"
+            m > 0 -> "${m}m ${s}s"
+            else -> "${s}s"
         }
     }
 
