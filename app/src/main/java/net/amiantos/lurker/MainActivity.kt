@@ -371,19 +371,20 @@ private fun ConnectionDot(connected: Boolean) {
 
 // ---- Chat ------------------------------------------------------------------
 
-/** One rendered row in the chat list, after grouping and divider insertion. */
+/** One rendered row in the chat list, after merging and divider insertion. */
 private sealed interface ChatRow {
-    data class Bubble(val msg: Msg, val first: Boolean, val last: Boolean) : ChatRow
+    data class Bubble(val msg: Msg) : ChatRow
     data class Action(val msg: Msg) : ChatRow
     data class SystemLine(val msg: Msg) : ChatRow
     data object NewMessages : ChatRow
 }
 
 /**
- * Fold messages into iMessage-style groups: consecutive bubbles from the same
- * nick stack (nick label once, tight gaps, timestamp on the last), and the
- * "New messages" divider slots in where the read cursor sat when the buffer
- * was opened. The divider also breaks a group — messages after it are new.
+ * Fold messages into bubbles: consecutive messages from the same sender MERGE
+ * into one bubble (self included), one line per message, with a format reset
+ * between lines so one message's mIRC colors can't bleed into the next. The
+ * "New messages" divider slots in where the read cursor sat when the buffer was
+ * opened and also breaks a merge — messages after it are new.
  */
 private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRow> {
     val out = ArrayList<ChatRow>(messages.size + 1)
@@ -401,14 +402,21 @@ private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRo
             msg.type == "action" -> { out.add(ChatRow.Action(msg)); prevBubble = null }
             else -> {
                 val sameGroup = !groupBroke && prevBubble != null &&
-                    prevBubble.nick == msg.nick && prevBubble.self == msg.self
+                    prevBubble.nick == msg.nick && prevBubble.self == msg.self &&
+                    prevBubble.type == msg.type
                 if (sameGroup) {
-                    // When grouped, the row just before this one is always the
-                    // previous bubble (anything else resets prevBubble): demote it.
+                    // The row just before this one is always the previous bubble
+                    // (anything else resets prevBubble): absorb into it.
                     val prev = out.last() as ChatRow.Bubble
-                    out[out.lastIndex] = prev.copy(last = false)
+                    out[out.lastIndex] = prev.copy(
+                        msg = prev.msg.copy(
+                            text = prev.msg.text + Fmt.RESET + "\n" + msg.text,
+                            time = msg.time ?: prev.msg.time,
+                        ),
+                    )
+                } else {
+                    out.add(ChatRow.Bubble(msg))
                 }
-                out.add(ChatRow.Bubble(msg, first = !sameGroup, last = true))
                 prevBubble = msg
             }
         }
@@ -493,11 +501,14 @@ private fun ChatScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
+            // Chat text follows the synced look.font.size.mobile setting (web px
+            // ~ sp); +2 keeps the historical default (14 -> 16sp).
+            val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
             LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
                 items(rows.size) { i ->
                     when (val row = rows[i]) {
-                        is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last)
-                        is ChatRow.Action -> ActionLine(row.msg)
+                        is ChatRow.Bubble -> MessageBubble(row.msg, baseSize)
+                        is ChatRow.Action -> ActionLine(row.msg, baseSize)
                         is ChatRow.SystemLine -> SystemLine(row.msg)
                         ChatRow.NewMessages -> NewMessagesDivider()
                     }
@@ -722,17 +733,8 @@ private fun readUpload(context: android.content.Context, uri: android.net.Uri): 
 }
 
 @Composable
-private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean) {
+private fun MessageBubble(msg: Msg, baseSize: Int) {
     val self = msg.self
-    // Corner tightening on the grouped edge, iMessage style.
-    val big = 18.dp
-    val tight = 5.dp
-    val shape = RoundedCornerShape(
-        topStart = if (!self && !first) tight else big,
-        topEnd = if (self && !first) tight else big,
-        bottomStart = if (!self && !last) tight else big,
-        bottomEnd = if (self && !last) tight else big,
-    )
     Column(
         horizontalAlignment = if (self) Alignment.End else Alignment.Start,
         modifier = Modifier
@@ -740,22 +742,22 @@ private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean) {
             .padding(
                 start = if (self) 64.dp else 12.dp,
                 end = if (self) 12.dp else 64.dp,
-                top = if (first) 8.dp else 1.dp,
+                top = 8.dp,
                 bottom = 1.dp,
             ),
     ) {
-        if (first && !self) {
+        if (!self) {
             Text(
                 msg.nick,
                 color = nickColor(msg.nick),
-                fontSize = 13.sp,
+                fontSize = (baseSize - 3).sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
             )
         }
         Box(
             Modifier
-                .background(if (self) AccentBlue else SurfaceRaised, shape)
+                .background(if (self) AccentBlue else SurfaceRaised, RoundedCornerShape(18.dp))
                 .padding(horizontal = 13.dp, vertical = 7.dp),
         ) {
             val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue)
@@ -768,27 +770,25 @@ private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean) {
                     msg.type == "notice" -> NoticeAmber
                     else -> Color.White
                 },
-                fontSize = 16.sp,
+                fontSize = baseSize.sp,
             )
         }
-        if (last) {
-            Text(
-                formatTime(msg.time) ?: "",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(
-                    start = if (self) 0.dp else 14.dp,
-                    end = if (self) 6.dp else 0.dp,
-                    top = 3.dp,
-                    bottom = 5.dp,
-                ),
-            )
-        }
+        Text(
+            formatTime(msg.time) ?: "",
+            color = TextSecondary,
+            fontSize = (baseSize - 5).sp,
+            modifier = Modifier.padding(
+                start = if (self) 0.dp else 14.dp,
+                end = if (self) 6.dp else 0.dp,
+                top = 3.dp,
+                bottom = 5.dp,
+            ),
+        )
     }
 }
 
 @Composable
-private fun ActionLine(msg: Msg) {
+private fun ActionLine(msg: Msg, baseSize: Int = 16) {
     val line = buildAnnotatedString {
         withStyle(SpanStyle(color = TextSecondary, fontStyle = FontStyle.Italic)) { append("* ") }
         withStyle(
@@ -798,7 +798,7 @@ private fun ActionLine(msg: Msg) {
     }
     Text(
         line,
-        fontSize = 14.sp,
+        fontSize = (baseSize - 2).sp,
         color = Color.White,
         modifier = Modifier.fillMaxWidth().padding(16.dp, 5.dp),
     )
@@ -913,6 +913,10 @@ private fun Composer(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit, 
 @Composable
 private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit) {
     var showColors by remember { mutableStateOf(false) }
+    // The last text color picked this session: a fill pick pairs with it, since
+    // mIRC syntax can't set a background without a foreground.
+    var lastFg by remember { mutableStateOf<Int?>(null) }
+    var fillMode by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -942,6 +946,26 @@ private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit)
             )
             DropdownMenu(expanded = showColors, onDismissRequest = { showColors = false }) {
                 Column(Modifier.padding(10.dp)) {
+                    // Text vs Fill: fill inserts a fg,bg pair (fg = last-picked
+                    // text color, else a contrast-safe black/white).
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(onClick = { fillMode = false }) {
+                            Text(
+                                "Text",
+                                color = if (!fillMode) AccentBlue else TextSecondary,
+                                fontWeight = if (!fillMode) FontWeight.SemiBold else FontWeight.Normal,
+                                fontSize = 13.sp,
+                            )
+                        }
+                        TextButton(onClick = { fillMode = true }) {
+                            Text(
+                                "Background",
+                                color = if (fillMode) AccentBlue else TextSecondary,
+                                fontWeight = if (fillMode) FontWeight.SemiBold else FontWeight.Normal,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
                     for (rowStart in 0 until 16 step 8) {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             for (i in rowStart until rowStart + 8) {
@@ -952,8 +976,14 @@ private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit)
                                         .border(1.dp, PillGray, CircleShape)
                                         .clickable {
                                             showColors = false
-                                            // Selection gets color..clear; bare opener at cursor.
-                                            onChange(applyFormat(draft, Fmt.color(i), Fmt.COLOR))
+                                            if (fillMode) {
+                                                val fg = lastFg ?: Mirc.contrastIndex(i)
+                                                onChange(applyFormat(draft, Fmt.colorPair(fg, i), Fmt.COLOR))
+                                            } else {
+                                                lastFg = i
+                                                // Selection gets color..clear; bare opener at cursor.
+                                                onChange(applyFormat(draft, Fmt.color(i), Fmt.COLOR))
+                                            }
                                         },
                                 )
                             }

@@ -32,6 +32,9 @@ object Fmt {
     const val RESET = "\u000F"
 
     fun color(index: Int): String = COLOR + "%02d".format(index)
+
+    /** Foreground + background pair: "FF,BB". mIRC requires a fg with bg. */
+    fun colorPair(fg: Int, bg: Int): String = COLOR + "%02d,%02d".format(fg, bg)
 }
 
 /** A run of text sharing one visual style. `fg`/`bg` are ARGB ints or null. */
@@ -97,6 +100,19 @@ object Mirc {
 
     /** Palette lookup; null for 99 ("default") or out-of-range. */
     fun color(index: Int): Int? = if (index in PALETTE.indices) PALETTE[index] else null
+
+    /**
+     * A readable default TEXT color (palette index 0=white or 1=black) for use
+     * on top of background color [bg] — used when the user picks a fill without
+     * having picked a text color first.
+     */
+    fun contrastIndex(bg: Int): Int {
+        val c = color(bg) ?: return 0
+        val r = (c shr 16) and 0xFF
+        val g = (c shr 8) and 0xFF
+        val b = c and 0xFF
+        return if ((r * 299 + g * 587 + b * 114) / 1000 > 140) 1 else 0
+    }
 
     /**
      * Split a raw IRC line into styled spans. Control codes are consumed and

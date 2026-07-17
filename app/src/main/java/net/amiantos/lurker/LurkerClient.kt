@@ -127,6 +127,7 @@ class LurkerClient {
                 fetchNetworkNames()
                 openSocket(null)
             }
+            loadSettings() // chat rendering (font size) reads the registry
         }
     }
 
@@ -159,6 +160,7 @@ class LurkerClient {
                 loggedIn = true
             }
             openSocket(null)
+            loadSettings() // chat rendering (font size) reads the registry
         } catch (e: Exception) {
             post { status = "Sign-in failed: ${e.message}" }
         }
@@ -881,6 +883,14 @@ class LurkerClient {
             }
         } catch (_: Exception) {
         }
+    }
+
+    /** Effective int value of a registry setting: override ?? default ?? fallback. */
+    fun settingInt(key: String, fallback: Int): Int {
+        (settingsValues[key] as? Number)?.let { return it.toInt() }
+        (settingsValues[key] as? String)?.toIntOrNull()?.let { return it }
+        (settingsRegistry.firstOrNull { it.key == key }?.default as? Number)?.let { return it.toInt() }
+        return fallback
     }
 
     private fun applyValues(res: Response) {
