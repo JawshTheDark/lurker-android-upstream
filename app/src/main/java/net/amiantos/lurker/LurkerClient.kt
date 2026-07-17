@@ -58,6 +58,9 @@ class LurkerClient {
     /** bufferKey -> channel roster, from names frames + incremental events. */
     val members = mutableStateMapOf<String, List<Member>>()
 
+    /** bufferKey -> (nick -> expiry ms) of people currently typing there. */
+    val typing = mutableStateMapOf<String, Map<String, Long>>()
+
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
 
@@ -206,6 +209,7 @@ class LurkerClient {
             lastRead.clear()
             dividerAfter.clear()
             members.clear()
+            typing.clear()
             hasMoreOlder.clear()
             loadingOlder.clear()
             pendingSends.clear()
@@ -426,6 +430,12 @@ class LurkerClient {
                 }
                 val target = frame.optString("target")
                 if (target.isEmpty()) return
+                // Typing is ephemeral and must not create buffers — handle it
+                // before ensureBuffer and bail.
+                if (frame.optString("type") == "typing") {
+                    applyTyping("${networkId ?: "sys"}::$target", networkId, frame)
+                    return
+                }
                 bumpCursor(frame.optLong("id"))
                 val buffer = ensureBuffer(networkId, target)
                 // Roster updates ride the same stream; apply before the renderable
@@ -596,6 +606,64 @@ class LurkerClient {
             }
             "channel-parted" -> members.remove(key)
         }
+    }
+
+    // ---- Typing indicators --------------------------------------------------
+
+    /** Apply an inbound typing event: active adds (with TTL), paused/done remove. */
+    private fun applyTyping(key: String, networkId: Int?, frame: JSONObject) {
+        val nick = frame.optString("nick")
+        if (nick.isEmpty()) return
+        // Never show our own echo.
+        if (networkId != null && networks[networkId]?.nick?.equals(nick, true) == true) return
+        val cur = typing[key].orEmpty().toMutableMap()
+        if (frame.optString("state") == "active") {
+            cur[nick] = System.currentTimeMillis() + TYPING_TTL
+            main.postDelayed({ sweepTyping(key) }, TYPING_TTL + 250)
+        } else {
+            cur.remove(nick)
+        }
+        if (cur.isEmpty()) typing.remove(key) else typing[key] = cur
+    }
+
+    /** Drop typers whose `active` refresh stopped arriving (they went quiet). */
+    private fun sweepTyping(key: String) {
+        val now = System.currentTimeMillis()
+        val cur = typing[key] ?: return
+        val alive = cur.filterValues { it > now }
+        if (alive.size != cur.size) {
+            if (alive.isEmpty()) typing.remove(key) else typing[key] = alive
+        }
+    }
+
+    private val typingSentAt = mutableMapOf<String, Long>()
+
+    /**
+     * Broadcast that we're composing in [buffer] (throttled to every 3s, the
+     * IRCv3 cadence). Gated by chat.send_typing_notifications; commands are
+     * never broadcast.
+     */
+    fun notifyTyping(buffer: Buffer, active: Boolean) {
+        val networkId = buffer.networkId ?: return
+        if (!settingBool("chat.send_typing_notifications", true)) return
+        val now = System.currentTimeMillis()
+        if (active && now - (typingSentAt[buffer.key] ?: 0) < 3_000) return
+        typingSentAt[buffer.key] = if (active) now else 0
+        ws?.send(
+            JSONObject()
+                .put("type", "typing")
+                .put("networkId", networkId)
+                .put("target", buffer.target)
+                .put("state", if (active) "active" else "done")
+                .toString(),
+        )
+    }
+
+    /** Effective bool value of a registry setting: override ?? default ?? fallback. */
+    fun settingBool(key: String, fallback: Boolean): Boolean {
+        (settingsValues[key] as? Boolean)?.let { return it }
+        (settingsRegistry.firstOrNull { it.key == key }?.default as? Boolean)?.let { return it }
+        return fallback
     }
 
     /** Render a whois_result into the currently focused buffer as a block. */
@@ -1232,6 +1300,9 @@ class LurkerClient {
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 30_000L
         const val SEND_ACK_TIMEOUT = 8_000L // matches the web client's deadline
+
+        /** How long an `active` typing signal lives without a refresh. */
+        const val TYPING_TTL = 6_000L
 
         /** Background longer than this + a quiet socket -> proactive cycle. */
         const val BACKGROUND_CYCLE_MS = 30_000L

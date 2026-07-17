@@ -55,7 +55,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -635,6 +645,36 @@ private fun ChatScreen(
 
     val showLoadOlder = client.hasMoreOlder[buffer.key] == true && buffer.networkId != null
     val loadingOlder = client.loadingOlder[buffer.key] == true
+    val typers = client.typing[buffer.key]?.keys?.sorted() ?: emptyList()
+    var joinPrompt by remember { mutableStateOf<String?>(null) }
+
+    // Reveal the ghost bubble only when already reading the tail.
+    LaunchedEffect(typers.isNotEmpty()) {
+        if (typers.isNotEmpty() && rows.isNotEmpty() && !listState.canScrollForward) {
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+        }
+    }
+
+    joinPrompt?.let { chan ->
+        AlertDialog(
+            onDismissRequest = { joinPrompt = null },
+            containerColor = SurfaceRaised,
+            title = { Text("Join $chan?", color = TextPrimary) },
+            text = { Text("Join the channel on ${buffer.networkName}?", color = TextSecondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    joinPrompt = null
+                    buffer.networkId?.let { networkId ->
+                        client.execute(buffer, listOf(WireOp("join", channel = chan)))
+                        onOpenBuffer(client.focusTarget(networkId, chan))
+                    }
+                }) { Text("Join", color = AccentBlue, fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { joinPrompt = null }) { Text("Cancel", color = TextSecondary) }
+            },
+        )
+    }
     val oldestId = messages.firstOrNull { it.id > 0 }?.id
     // Set when a load-older is requested: the id whose row we re-anchor to once
     // the prepend lands, so the viewport doesn't jump.
@@ -704,9 +744,17 @@ private fun ChatScreen(
                 when (val row = rows[i]) {
                     is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last, baseSize)
                     is ChatRow.Action -> ActionLine(row.msg, baseSize)
-                    is ChatRow.SystemLine -> SystemLine(row.msg)
+                    is ChatRow.SystemLine -> SystemLine(
+                        row.msg,
+                        onJoin = if (buffer.networkId != null) {
+                            { chan -> joinPrompt = chan }
+                        } else null,
+                    )
                     ChatRow.NewMessages -> NewMessagesDivider()
                 }
+            }
+            if (typers.isNotEmpty()) {
+                item { TypingBubble(typers) }
             }
         }
 
@@ -790,13 +838,24 @@ private fun ChatScreen(
             ) {
                 Composer(
                     draft = draft,
-                    onChange = { draft = it },
+                    onChange = { new ->
+                        val hadText = draft.text.isNotBlank()
+                        draft = new
+                        val hasText = new.text.isNotBlank()
+                        // Commands never broadcast composing state.
+                        if (hasText && !new.text.startsWith("/")) {
+                            client.notifyTyping(buffer, active = true)
+                        } else if (hadText && !hasText) {
+                            client.notifyTyping(buffer, active = false)
+                        }
+                    },
                     target = buffer.displayName,
                     uploading = client.uploading,
                     onAttach = { uploadPicker.launch("*/*") },
                 ) {
                     val text = draft.text.trim()
                     if (text.isEmpty()) return@Composer
+                    client.notifyTyping(buffer, active = false)
                     when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
                         is ParsedInput.Ops -> {
                             client.execute(buffer, parsed.ops)
@@ -1115,8 +1174,51 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16) {
     )
 }
 
+private val CHANNEL_RE = Regex("""#[^\s,]+""")
+
+/** iMessage-style "someone is composing" bubble with three breathing dots. */
 @Composable
-private fun SystemLine(msg: Msg) {
+private fun TypingBubble(nicks: List<String>) {
+    Column(
+        horizontalAlignment = Alignment.Start,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 64.dp, top = 8.dp, bottom = 2.dp),
+    ) {
+        Text(
+            nicks.joinToString(", "),
+            color = nickColor(nicks.first()),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
+        )
+        Box(
+            Modifier
+                .background(SurfaceRaised, RoundedCornerShape(18.dp))
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+        ) {
+            val transition = rememberInfiniteTransition(label = "typing")
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                repeat(3) { i ->
+                    val alpha by transition.animateFloat(
+                        initialValue = 0.25f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(500),
+                            repeatMode = RepeatMode.Reverse,
+                            initialStartOffset = StartOffset(i * 160),
+                        ),
+                        label = "dot$i",
+                    )
+                    Box(Modifier.size(8.dp).background(TextSecondary.copy(alpha = alpha), CircleShape))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
     if (msg.type == "send-failed") {
         Text(
             msg.text,
@@ -1129,8 +1231,26 @@ private fun SystemLine(msg: Msg) {
     }
     if (msg.type == "whois") {
         // WHOIS blocks read like terminal output: left-aligned, monospace.
+        // Channel names are tappable (join prompt) when a handler is provided.
+        val body = if (onJoin != null) {
+            buildAnnotatedString {
+                append(msg.text)
+                for (m in CHANNEL_RE.findAll(msg.text)) {
+                    addLink(
+                        LinkAnnotation.Clickable(
+                            m.value,
+                            TextLinkStyles(SpanStyle(color = AccentBlue)),
+                        ) { onJoin(m.value) },
+                        m.range.first,
+                        m.range.last + 1,
+                    )
+                }
+            }
+        } else {
+            AnnotatedString(msg.text)
+        }
         Text(
-            msg.text,
+            body,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             color = TextSecondary,
