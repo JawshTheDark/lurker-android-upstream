@@ -58,6 +58,18 @@ class LurkerClient {
     /** bufferKey -> channel roster, from names frames + incremental events. */
     val members = mutableStateMapOf<String, List<Member>>()
 
+    /** bufferKey -> whether older history exists beyond what's loaded. */
+    val hasMoreOlder = mutableStateMapOf<String, Boolean>()
+
+    /** bufferKey -> a history(before) request is in flight. */
+    val loadingOlder = mutableStateMapOf<String, Boolean>()
+
+    // Outstanding sends awaiting their send-result ack (clientId -> context).
+    // The web client uses the same 8s deadline before declaring a send lost.
+    private data class PendingSend(val bufferKey: String, val text: String)
+    private val pendingSends = mutableMapOf<String, PendingSend>()
+    private var clientIdSeq = 0
+
     /** bufferKey -> server read cursor (highest id the user has read). */
     private val lastRead = mutableMapOf<String, Long>()
 
@@ -187,6 +199,9 @@ class LurkerClient {
             lastRead.clear()
             dividerAfter.clear()
             members.clear()
+            hasMoreOlder.clear()
+            loadingOlder.clear()
+            pendingSends.clear()
             transfers.clear()
             settingsRegistry.clear()
             settingsValues.clear()
@@ -339,6 +354,7 @@ class LurkerClient {
                 mergeInto(buffer.key, parsed, replace = reset || messagesByBuffer[buffer.key] == null)
                 seedUnread(buffer.key, frame)
                 if (frame.has("lastReadId")) lastRead[buffer.key] = frame.optLong("lastReadId")
+                if (frame.has("hasMoreOlder")) hasMoreOlder[buffer.key] = frame.optBoolean("hasMoreOlder")
             }
 
             "irc" -> {
@@ -388,8 +404,68 @@ class LurkerClient {
 
             "dcc-transfer" -> frame.optJSONObject("transfer")?.let { applyTransfer(it) }
 
+            "send-result" -> {
+                val clientId = frame.optString("clientId")
+                if (frame.optBoolean("ok", false)) {
+                    pendingSends.remove(clientId)
+                } else {
+                    failSend(clientId, frame.optString("error").ifEmpty { "rejected by server" })
+                }
+            }
+
+            // Reply to a history(before) page: prepend older events, dedup by id.
+            "history" -> {
+                val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
+                val target = frame.optString("target")
+                if (target.isEmpty()) return
+                val key = "${networkId ?: "sys"}::$target"
+                loadingOlder.remove(key)
+                if (frame.has("hasMoreOlder")) hasMoreOlder[key] = frame.optBoolean("hasMoreOlder")
+                val parsed = parseEvents(frame.optJSONArray("events"))
+                if (parsed.isEmpty()) return
+                val existing = messagesByBuffer[key] ?: emptyList()
+                val known = existing.mapNotNull { m -> m.id.takeIf { it > 0 } }.toHashSet()
+                val older = parsed.filter { it.id <= 0 || it.id !in known }
+                if (older.isNotEmpty()) messagesByBuffer[key] = older + existing
+            }
+
             "error" -> status = frame.optString("text")
         }
+    }
+
+    /** Ask for the page of history older than what's currently loaded. */
+    fun loadOlder(buffer: Buffer) {
+        val networkId = buffer.networkId ?: return
+        val key = buffer.key
+        if (loadingOlder[key] == true) return
+        val oldest = messagesByBuffer[key]?.firstOrNull { it.id > 0 }?.id ?: return
+        loadingOlder[key] = true
+        ws?.send(
+            JSONObject()
+                .put("type", "history")
+                .put("networkId", networkId)
+                .put("target", buffer.target)
+                .put("mode", "before")
+                .put("before", oldest)
+                .put("limit", 100)
+                .toString(),
+        )
+    }
+
+    private fun failSend(clientId: String, reason: String) {
+        val pending = pendingSends.remove(clientId) ?: return
+        val preview = pending.text.let { if (it.length > 80) it.take(77) + "…" else it }
+        mergeInto(
+            pending.bufferKey,
+            listOf(
+                Msg(
+                    id = 0, type = "send-failed", nick = "",
+                    text = "⚠ Not delivered ($reason): “$preview”",
+                    self = false, system = true,
+                ),
+            ),
+            replace = false,
+        )
     }
 
     private fun applyNetworks(arr: JSONArray) {
@@ -715,8 +791,16 @@ class LurkerClient {
             val target = op.target ?: buffer.target
             val frame = JSONObject().put("networkId", networkId)
             when (op.type) {
-                "send", "action", "notice" ->
+                "send", "action", "notice" -> {
                     frame.put("type", op.type).put("target", target).put("text", op.text)
+                    // Correlate with the send-result ack so a rejected or lost
+                    // message is surfaced instead of silently vanishing.
+                    val clientId = "a${++clientIdSeq}"
+                    frame.put("clientId", clientId)
+                    val key = "${networkId}::$target"
+                    pendingSends[clientId] = PendingSend(key, op.text.orEmpty())
+                    main.postDelayed({ failSend(clientId, "no acknowledgement (timeout)") }, SEND_ACK_TIMEOUT)
+                }
                 "raw" -> frame.put("type", "raw").put("line", op.line)
                 "join" -> frame.put("type", "join").put("channel", op.channel)
                 "part" -> {
@@ -950,6 +1034,7 @@ class LurkerClient {
     private companion object {
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 30_000L
+        const val SEND_ACK_TIMEOUT = 8_000L // matches the web client's deadline
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }

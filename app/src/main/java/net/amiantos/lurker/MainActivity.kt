@@ -457,8 +457,36 @@ private fun ChatScreen(
         }
     }
 
-    LaunchedEffect(rows.size) {
-        if (rows.isNotEmpty()) listState.scrollToItem(rows.lastIndex)
+    val showLoadOlder = client.hasMoreOlder[buffer.key] == true && buffer.networkId != null
+    val loadingOlder = client.loadingOlder[buffer.key] == true
+    val oldestId = messages.firstOrNull { it.id > 0 }?.id
+    // Set when a load-older is requested: the id whose row we re-anchor to once
+    // the prepend lands, so the viewport doesn't jump.
+    var anchorId by remember(buffer.key) { mutableStateOf<Long?>(null) }
+    val headerCount = if (showLoadOlder) 1 else 0
+
+    // Follow the tail only when the tail itself changed — a prepend of older
+    // history grows the list without moving the newest message.
+    val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
+    LaunchedEffect(tailSig) {
+        if (rows.isNotEmpty() && anchorId == null) listState.scrollToItem(rows.lastIndex + headerCount)
+    }
+    // Older page landed: put the previously-oldest row back under the finger.
+    LaunchedEffect(oldestId) {
+        val anchor = anchorId ?: return@LaunchedEffect
+        if (oldestId != null && oldestId < anchor) {
+            val idx = rows.indexOfFirst { r ->
+                val id = when (r) {
+                    is ChatRow.Bubble -> r.msg.id
+                    is ChatRow.Action -> r.msg.id
+                    is ChatRow.SystemLine -> r.msg.id
+                    ChatRow.NewMessages -> -1L
+                }
+                id >= anchor
+            }
+            if (idx >= 0) listState.scrollToItem(idx + headerCount)
+            anchorId = null
+        }
     }
 
     Scaffold(
@@ -505,6 +533,21 @@ private fun ChatScreen(
             // ~ sp); +2 keeps the historical default (14 -> 16sp).
             val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
             LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
+                if (showLoadOlder) {
+                    item {
+                        TextButton(
+                            onClick = { anchorId = oldestId; client.loadOlder(buffer) },
+                            enabled = !loadingOlder,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                if (loadingOlder) "Loading…" else "Load older messages",
+                                color = if (loadingOlder) TextSecondary else AccentBlue,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
+                }
                 items(rows.size) { i ->
                     when (val row = rows[i]) {
                         is ChatRow.Bubble -> MessageBubble(row.msg, baseSize)
@@ -806,6 +849,16 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16) {
 
 @Composable
 private fun SystemLine(msg: Msg) {
+    if (msg.type == "send-failed") {
+        Text(
+            msg.text,
+            fontSize = 13.sp,
+            color = AlertRed,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth().padding(24.dp, 6.dp),
+        )
+        return
+    }
     if (msg.type == "whois") {
         // WHOIS blocks read like terminal output: left-aligned, monospace.
         Text(
