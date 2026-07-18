@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only: allow cleartext HTTP so the app can reach a dev bouncer over
+     plain http (e.g. the emulator's 10.0.2.2 proxy). Release builds omit this
+     and are HTTPS-only, which keeps the Play Data Safety declaration clean. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic" />
+
+</manifest>

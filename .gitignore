@@ -38,3 +38,9 @@ google-services.json
 
 # macOS
 .DS_Store
+
+# Release signing (NEVER commit)
+keystore/
+keystore.properties
+*.jks
+*.keystore

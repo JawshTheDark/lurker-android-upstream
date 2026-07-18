@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+// Release signing lives in a gitignored keystore.properties (see .gitignore).
+// Absent (e.g. a fresh clone or CI without secrets) → release falls back to
+// debug signing so the build still succeeds.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
 
 android {
@@ -12,7 +22,9 @@ android {
     }
 
     defaultConfig {
-        applicationId = "net.amiantos.lurker"
+        // Distinct package for the public Play build so it never collides with
+        // the private stack app (net.amiantos.lurker). Permanent once published.
+        applicationId = "chat.irc.lurker"
         // 33 (Android 13) so the app installs on e-ink Android devices, which lag
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
         minSdk = 33
@@ -23,10 +35,26 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (keystoreProps.isNotEmpty()) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             optimization {
                 enable = false
+            }
+            signingConfig = if (keystoreProps.isNotEmpty()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }
