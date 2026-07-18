@@ -1478,8 +1478,10 @@ private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
         )
         return
     }
+    // Through the mIRC renderer: topics regularly carry color/format codes,
+    // which as plain text leak their digits ("09[Game Online]…").
     Text(
-        msg.text,
+        mircAnnotated(msg.text, AccentBlue),
         fontSize = 12.sp,
         fontStyle = FontStyle.Italic,
         color = TextSecondary,
