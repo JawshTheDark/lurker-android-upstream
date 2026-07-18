@@ -107,7 +107,7 @@ class LurkerClient {
     private val io = Executors.newSingleThreadExecutor()
     private val json = "application/json; charset=utf-8".toMediaType()
 
-    private var ws: WebSocket? = null
+    @Volatile private var ws: WebSocket? = null
     private var token: String? = null
     private var baseUrl: String = ""
     private val networkNames = mutableMapOf<Int, String>()
@@ -349,6 +349,7 @@ class LurkerClient {
             .build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocket !== ws) return // superseded socket — ignore
                 android.util.Log.i("LurkerWS", "open")
                 lastFrameAt = System.currentTimeMillis()
                 webSocket.send(presenceFrame(true))
@@ -361,6 +362,7 @@ class LurkerClient {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (webSocket !== ws) return // superseded socket — ignore
                 lastFrameAt = System.currentTimeMillis()
                 val frame = try {
                     JSONObject(text)
@@ -371,6 +373,10 @@ class LurkerClient {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                // The cancel() from a cycle fires this on the OLD socket, often
+                // AFTER the new one opened — acting on it flipped `connected`
+                // false and double-booked reconnects (the reopen "flutter").
+                if (webSocket !== ws) return
                 android.util.Log.w("LurkerWS", "failure http=${response?.code} ${t.javaClass.simpleName}: ${t.message}")
                 val code = response?.code
                 post {
@@ -392,6 +398,7 @@ class LurkerClient {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== ws) return // superseded socket — ignore
                 android.util.Log.w("LurkerWS", "closed code=$code reason=$reason")
                 post {
                     connected = false
