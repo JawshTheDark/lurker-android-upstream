@@ -139,6 +139,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -728,11 +729,23 @@ private fun ChatScreen(
     var anchorId by remember(buffer.key) { mutableStateOf<Long?>(null) }
     val headerCount = if (showLoadOlder) 1 else 0
 
+    // Reading position is sacred: follow the tail ONLY when the user is already
+    // at (or within a couple rows of) the bottom. The -2 slack also absorbs the
+    // index shift of the append itself. Scrolled up = stay put, no fighting.
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisible >= info.totalItemsCount - 2
+        }
+    }
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
-        if (rows.isNotEmpty() && anchorId == null) listState.scrollToItem(rows.lastIndex + headerCount)
+        if (rows.isNotEmpty() && anchorId == null && atBottom) {
+            listState.scrollToItem(rows.lastIndex + headerCount)
+        }
     }
     // Older page landed: put the previously-oldest row back under the finger.
     LaunchedEffect(oldestId) {
@@ -921,6 +934,31 @@ private fun ChatScreen(
                     draft = TextFieldValue("")
                 }
             }
+        }
+
+        // Jump back to the tail after reading history.
+        if (!atBottom && rows.isNotEmpty()) {
+            val scope = rememberCoroutineScope()
+            Text(
+                "↓ Latest",
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(
+                        end = 16.dp,
+                        bottom = with(density) { bottomBarHeightPx.toDp() } + 14.dp,
+                    )
+                    .background(SurfaceRaised, RoundedCornerShape(16.dp))
+                    .border(0.5.dp, GlassBorder, RoundedCornerShape(16.dp))
+                    .clickable {
+                        scope.launch {
+                            listState.scrollToItem(maxOf(0, listState.layoutInfo.totalItemsCount - 1))
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            )
         }
     }
 
