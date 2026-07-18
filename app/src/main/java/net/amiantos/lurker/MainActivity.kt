@@ -172,6 +172,7 @@ private sealed interface Screen {
     data object Settings : Screen
     data object Dcc : Screen
     data object Networks : Screen
+    data object Search : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
 
@@ -210,6 +211,7 @@ class MainActivity : ComponentActivity() {
                         onSettings = { client.loadSettings(); screen = Screen.Settings },
                         onDcc = { client.loadDcc(); screen = Screen.Dcc },
                         onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
+                        onSearch = { screen = Screen.Search },
                         onSignOut = { client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
@@ -236,6 +238,15 @@ class MainActivity : ComponentActivity() {
                         client = client,
                         onEdit = { screen = Screen.NetworkEdit(it) },
                         onAdd = { screen = Screen.NetworkEdit(null) },
+                        onBack = { screen = Screen.Buffers },
+                    )
+                    Screen.Search -> SearchScreen(
+                        client = client,
+                        onOpenResult = { networkId, target ->
+                            val buffer = client.focusTarget(networkId, target)
+                            client.setActive(buffer)
+                            screen = Screen.Chat(buffer)
+                        },
                         onBack = { screen = Screen.Buffers },
                     )
                     is Screen.NetworkEdit -> NetworkEditScreen(
@@ -340,6 +351,7 @@ private fun BufferListScreen(
     onSettings: () -> Unit,
     onDcc: () -> Unit,
     onNetworks: () -> Unit,
+    onSearch: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -394,6 +406,9 @@ private fun BufferListScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = onSearch) {
+                        Text("🔍", fontSize = 17.sp)
+                    }
                     TextButton(onClick = { menuOpen = true }) {
                         Text("⋯", color = TextSecondary, fontSize = 22.sp)
                     }
@@ -2547,6 +2562,139 @@ private fun FormField(
         ),
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+// ---- Search + highlights ---------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchScreen(
+    client: LurkerClient,
+    onOpenResult: (Int, String) -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    var tab by remember { mutableStateOf(0) } // 0 = search, 1 = highlights
+    var query by remember { mutableStateOf("") }
+
+    // Debounced search: re-run 300ms after typing stops.
+    LaunchedEffect(query) {
+        if (query.isBlank()) return@LaunchedEffect
+        kotlinx.coroutines.delay(300)
+        client.runSearch(query)
+    }
+    LaunchedEffect(tab) {
+        if (tab == 1 && client.highlightItems.isEmpty()) client.loadHighlights(fresh = true)
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text("Search", fontWeight = FontWeight.SemiBold) },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(16.dp, 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SearchTab("Messages", tab == 0) { tab = 0 }
+                SearchTab("Highlights", tab == 1) { tab = 1 }
+            }
+            if (tab == 0) {
+                TextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search — from:nick in:#chan on:net text", color = TextSecondary) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = SurfaceDark,
+                        unfocusedContainerColor = SurfaceDark,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        cursorColor = AccentBlue,
+                    ),
+                    modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp),
+                )
+                val results = client.searchResults
+                if (client.searchLoading && results.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+                }
+                if (!client.searchLoading && results.isEmpty() && query.isNotBlank()) {
+                    Text("No matches.", color = TextSecondary, modifier = Modifier.padding(16.dp))
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(results.size) { i ->
+                        val r = results[i]
+                        ResultRow(client, r, onOpenResult)
+                        if (i == results.size - 1 && client.searchHasMore) {
+                            LaunchedEffect(results.size) { client.searchMore() }
+                        }
+                    }
+                }
+            } else {
+                val items = client.highlightItems
+                if (client.highlightsLoading && items.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+                }
+                if (!client.highlightsLoading && items.isEmpty()) {
+                    Text("No recent highlights.", color = TextSecondary, modifier = Modifier.padding(16.dp))
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(items.size) { i ->
+                        ResultRow(client, items[i], onOpenResult)
+                        if (i == items.size - 1 && client.highlightsHasMore) {
+                            LaunchedEffect(items.size) { client.loadHighlights(fresh = false) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchTab(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (selected) AccentBlue else TextSecondary,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        fontSize = 15.sp,
+        modifier = Modifier
+            .background(if (selected) SurfaceRaised else Color.Transparent, RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
+}
+
+@Composable
+private fun ResultRow(client: LurkerClient, r: SearchResult, onOpen: (Int, String) -> Unit) {
+    val net = client.networks[r.networkId]?.name ?: ""
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable { if (r.networkId >= 0) onOpen(r.networkId, r.target) }
+            .padding(16.dp, 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(r.nick, color = nickColor(r.nick), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                r.target + (if (net.isNotEmpty()) " · $net" else ""),
+                color = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
+            formatTime(r.createdAt)?.let { Text(it, color = TextSecondary, fontSize = 11.sp) }
+        }
+        Text(mircAnnotated(r.body, AccentBlue), fontSize = 15.sp, color = TextPrimary, modifier = Modifier.padding(top = 2.dp))
+    }
+    HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 16.dp))
 }
 
 // ---- DCC -----------------------------------------------------------------

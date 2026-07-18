@@ -90,6 +90,20 @@ class LurkerClient {
     var dccEnabled by mutableStateOf(true)
         private set
 
+    // Search (WS) + highlights (REST). One monotonic token drops stale results.
+    val searchResults = mutableStateListOf<SearchResult>()
+    var searchLoading by mutableStateOf(false)
+    var searchHasMore by mutableStateOf(false)
+    var searchError by mutableStateOf<String?>(null)
+    private var searchToken = 0
+    private var searchNextBefore: Long? = null
+    private var lastSearchRaw: String = ""
+
+    val highlightItems = mutableStateListOf<SearchResult>()
+    var highlightsLoading by mutableStateOf(false)
+    private var highlightsNextBefore: Long? = null
+    var highlightsHasMore by mutableStateOf(false)
+
     // Settings (registry-driven; empty if the server predates the endpoint).
     val settingsRegistry = mutableStateListOf<SettingOption>()
     val settingsValues = mutableStateMapOf<String, Any?>()
@@ -214,6 +228,8 @@ class LurkerClient {
             loadingOlder.clear()
             pendingSends.clear()
             transfers.clear()
+            searchResults.clear()
+            highlightItems.clear()
             settingsRegistry.clear()
             settingsValues.clear()
             settingsLoaded = false
@@ -517,6 +533,21 @@ class LurkerClient {
                 messagesByBuffer.remove(key)
                 unread.remove(key)
                 highlights.remove(key)
+            }
+
+            "search-result" -> {
+                if (frame.optInt("token", -1) != searchToken) return // superseded
+                searchLoading = false
+                val arr = frame.optJSONArray("results")
+                val rows = ArrayList<SearchResult>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    parseResultRow(arr.optJSONObject(i) ?: continue)?.let(rows::add)
+                }
+                if (frame.isNull("before")) searchResults.clear()
+                val known = searchResults.mapTo(HashSet()) { it.id }
+                searchResults.addAll(rows.filter { it.id !in known })
+                searchHasMore = frame.optBoolean("hasMore", false)
+                searchNextBefore = if (searchHasMore) searchResults.lastOrNull()?.id else null
             }
 
             "dcc-transfer" -> frame.optJSONObject("transfer")?.let { applyTransfer(it) }
@@ -1265,6 +1296,97 @@ class LurkerClient {
             }
         } catch (e: Exception) {
             post { dccError = "DCC chat failed: ${e.message}" }
+        }
+    }
+
+    // ---- Search + highlights ------------------------------------------------
+
+    /** Run a fresh search from raw `from:/in:/on: text` input. */
+    fun runSearch(raw: String) {
+        lastSearchRaw = raw
+        val q = Search.parse(raw)
+        // A search needs at least free text OR a structured filter.
+        if (q.text.isBlank() && q.from.isEmpty() && q.inTarget.isBlank()) {
+            searchResults.clear(); searchHasMore = false; searchLoading = false
+            return
+        }
+        val token = ++searchToken
+        searchNextBefore = null
+        searchLoading = true
+        searchError = null
+        searchResults.clear()
+        sendSearch(q, token, before = null)
+    }
+
+    /** Fetch the next page of the current search. */
+    fun searchMore() {
+        val before = searchNextBefore ?: return
+        if (searchLoading) return
+        searchLoading = true
+        sendSearch(Search.parse(lastSearchRaw), searchToken, before)
+    }
+
+    private fun sendSearch(q: Search.Query, token: Int, before: Long?) {
+        val networkId = if (q.onNetwork.isNotBlank()) {
+            networks.values.firstOrNull { it.name.equals(q.onNetwork, true) }?.id
+        } else null
+        val frame = JSONObject()
+            .put("type", "search")
+            .put("token", token)
+            .put("limit", 50)
+        if (q.text.isNotBlank()) frame.put("query", q.text)
+        if (q.from.isNotEmpty()) frame.put("nicks", JSONArray(q.from))
+        if (q.inTarget.isNotBlank()) frame.put("target", q.inTarget)
+        if (networkId != null) frame.put("networkId", networkId)
+        if (before != null) frame.put("before", before)
+        ws?.send(frame.toString())
+    }
+
+    private fun parseResultRow(o: JSONObject): SearchResult? {
+        val id = o.optLong("id", -1)
+        if (id < 0) return null
+        return SearchResult(
+            id = id,
+            networkId = o.optInt("networkId", -1),
+            target = o.optString("target"),
+            nick = o.optString("nick", "*"),
+            // Search rows use DB columns (body/createdAt); fall back to live-frame names.
+            body = o.optString("body").ifEmpty { o.optString("text") },
+            createdAt = o.optString("createdAt").ifEmpty { o.optString("time").ifEmpty { null } },
+        )
+    }
+
+    /** GET /api/highlights — paginated recent highlight messages (REST). */
+    fun loadHighlights(fresh: Boolean) {
+        if (highlightsLoading) return
+        if (fresh) { highlightItems.clear(); highlightsNextBefore = null }
+        val before = highlightsNextBefore
+        post { highlightsLoading = true }
+        io.execute {
+            try {
+                val path = "/api/highlights?limit=50" + (before?.let { "&before=$it" } ?: "")
+                http.newCall(authed(path).build()).execute().use { res ->
+                    if (!res.isSuccessful) {
+                        post { highlightsLoading = false }
+                        return@execute
+                    }
+                    val obj = JSONObject(res.body?.string().orEmpty())
+                    val arr = obj.optJSONArray("items")
+                    val next = if (obj.isNull("nextBefore")) null else obj.optLong("nextBefore")
+                    val rows = ArrayList<SearchResult>()
+                    if (arr != null) for (i in 0 until arr.length()) {
+                        parseResultRow(arr.optJSONObject(i) ?: continue)?.let(rows::add)
+                    }
+                    post {
+                        highlightItems.addAll(rows)
+                        highlightsNextBefore = next
+                        highlightsHasMore = next != null
+                        highlightsLoading = false
+                    }
+                }
+            } catch (_: Exception) {
+                post { highlightsLoading = false }
+            }
         }
     }
 

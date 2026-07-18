@@ -66,6 +66,16 @@ data class DccTransfer(
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
 }
 
+/** One search / highlights result row (decorated DB message: body + createdAt). */
+data class SearchResult(
+    val id: Long,
+    val networkId: Int,
+    val target: String,
+    val nick: String,
+    val body: String,
+    val createdAt: String?,
+)
+
 /**
  * A channel member from `names` frames. `modes` are IRC mode letters
  * (q owner / a admin / o op / h halfop / v voice); the glyph mapping is
