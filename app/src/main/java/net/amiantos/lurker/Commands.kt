@@ -41,6 +41,32 @@ object Commands {
     fun isChannel(target: String): Boolean =
         target.isNotEmpty() && target[0] in "#&+!"
 
+    /**
+     * Expand a user alias once (single-pass, no loops — mirrors the web's
+     * aliasResolver). `/name args…` where `name` matches an alias becomes the
+     * expansion with `$1..$9` = positional args, `$2-` = 2nd arg onward, `$*` =
+     * whole arg line, `$me` = own nick, `$chan` = current target. A template
+     * with no `$` params gets the args appended. Returns [input] unchanged when
+     * nothing matches — so this is a safe no-op when there are no aliases.
+     */
+    fun expandAlias(input: String, aliases: List<AliasEntry>, nick: String?, target: String): String {
+        if (aliases.isEmpty() || !input.startsWith("/") || input.startsWith("//")) return input
+        val space = input.indexOf(' ')
+        val verb = (if (space == -1) input.substring(1) else input.substring(1, space)).lowercase()
+        val alias = aliases.firstOrNull { it.name.equals(verb, true) } ?: return input
+        val argLine = if (space == -1) "" else input.substring(space + 1).trim()
+        val args = if (argLine.isEmpty()) emptyList() else argLine.split(Regex("\\s+"))
+        var out = alias.expansion
+        val hasParam = out.contains('$')
+        out = out.replace(Regex("\\$([1-9])-")) { m ->
+            args.drop(m.groupValues[1].toInt() - 1).joinToString(" ")
+        }
+        out = out.replace(Regex("\\$([1-9])")) { m -> args.getOrNull(m.groupValues[1].toInt() - 1) ?: "" }
+        out = out.replace("$*", argLine).replace("\$me", nick ?: "").replace("\$chan", target)
+        if (!hasParam && argLine.isNotEmpty()) out = "$out $argLine"
+        return out.trim()
+    }
+
     fun parse(input: String, currentTarget: String, hasNetwork: Boolean): ParsedInput {
         val line = input.trimEnd()
         if (line.isEmpty()) return EMPTY

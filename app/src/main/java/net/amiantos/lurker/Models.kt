@@ -66,6 +66,9 @@ data class DccTransfer(
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
 }
 
+/** A server-synced custom slash alias: /name expands to expansion with $1..$9 params. */
+data class AliasEntry(val id: Int, val name: String, val expansion: String)
+
 /** One search / highlights result row (decorated DB message: body + createdAt). */
 data class SearchResult(
     val id: Long,

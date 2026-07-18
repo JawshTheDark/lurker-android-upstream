@@ -61,6 +61,17 @@ class LurkerClient {
     /** bufferKey -> (nick -> expiry ms) of people currently typing there. */
     val typing = mutableStateMapOf<String, Map<String, Long>>()
 
+    /** bufferKey -> server-synced draft text (persisted across devices). */
+    val drafts = mutableStateMapOf<String, String>()
+    private val draftPending = HashSet<String>() // keys with an unflushed local edit
+    private val draftFlush = HashMap<String, Runnable>()
+
+    /** bufferKey -> recent submitted lines (server-synced), oldest→newest. */
+    val inputHistory = mutableStateMapOf<String, List<String>>()
+
+    /** Server-synced custom aliases (name -> expansion). Fork-only feature. */
+    val aliases = mutableStateListOf<AliasEntry>()
+
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
 
@@ -228,6 +239,9 @@ class LurkerClient {
             loadingOlder.clear()
             pendingSends.clear()
             transfers.clear()
+            drafts.clear()
+            inputHistory.clear()
+            aliases.clear()
             searchResults.clear()
             highlightItems.clear()
             settingsRegistry.clear()
@@ -288,6 +302,7 @@ class LurkerClient {
     /** Called from the Activity's ON_STOP — remember when we left. */
     fun onBackground() {
         wentBackgroundAt = System.currentTimeMillis()
+        activeBuffer?.let { flushDraft(it) } // don't lose an unsynced draft
         ws?.send(presenceFrame(false))
     }
 
@@ -463,6 +478,7 @@ class LurkerClient {
             "snapshot" -> {
                 bumpCursor(frame.optLong("cursor"))
                 frame.optJSONArray("networks")?.let { applyNetworks(it) }
+                if (frame.has("aliases")) applyAliases(frame.optJSONArray("aliases"))
             }
 
             "backlog" -> {
@@ -478,6 +494,9 @@ class LurkerClient {
                 seedUnread(buffer.key, frame)
                 if (frame.has("lastReadId")) lastRead[buffer.key] = frame.optLong("lastReadId")
                 if (frame.has("hasMoreOlder")) hasMoreOlder[buffer.key] = frame.optBoolean("hasMoreOlder")
+                frame.optJSONArray("inputHistory")?.let { h ->
+                    inputHistory[buffer.key] = (0 until h.length()).map { h.optString(it) }
+                }
                 // Reopening a buffer: once the fresh backlog hydrates, tell the
                 // server we're caught up to what it just showed us.
                 scheduleMarkRead(buffer.key)
@@ -549,6 +568,32 @@ class LurkerClient {
                 searchHasMore = frame.optBoolean("hasMore", false)
                 searchNextBefore = if (searchHasMore) searchResults.lastOrNull()?.id else null
             }
+
+            "draft-snapshot" -> {
+                drafts.clear()
+                frame.optJSONArray("drafts")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val d = arr.optJSONObject(i) ?: continue
+                        val key = "${d.optInt("networkId")}::${d.optString("target")}"
+                        val body = d.optString("body")
+                        if (body.isNotEmpty()) drafts[key] = body
+                    }
+                }
+            }
+            "draft-updated" -> {
+                val key = "${frame.optInt("networkId")}::${frame.optString("target")}"
+                // Don't clobber an in-progress local edit with a remote echo.
+                if (key !in draftPending) {
+                    val body = frame.optString("body")
+                    if (body.isEmpty()) drafts.remove(key) else drafts[key] = body
+                }
+            }
+            "input-history-added" -> {
+                val key = "${frame.optInt("networkId")}::${frame.optString("target")}"
+                val text = frame.optString("text")
+                if (text.isNotEmpty()) inputHistory[key] = (inputHistory[key] ?: emptyList()) + text
+            }
+            "alias-list-updated" -> applyAliases(frame.optJSONArray("aliases"))
 
             "dcc-transfer" -> frame.optJSONObject("transfer")?.let { applyTransfer(it) }
 
@@ -902,6 +947,67 @@ class LurkerClient {
             markReadQueued = false
             activeBuffer?.takeIf { it.key == activeKey }?.let(::markRead)
         }, 1_500)
+    }
+
+    // ---- Drafts + input history --------------------------------------------
+
+    /** Update a buffer's draft locally and debounce-sync it (500ms, like web). */
+    fun setDraftLocal(buffer: Buffer, text: String) {
+        val networkId = buffer.networkId ?: return
+        val key = buffer.key
+        if (text.isEmpty()) drafts.remove(key) else drafts[key] = text
+        draftPending.add(key)
+        draftFlush.remove(key)?.let(main::removeCallbacks)
+        val r = Runnable { flushDraft(buffer) }
+        draftFlush[key] = r
+        main.postDelayed(r, 500)
+    }
+
+    /** Send the pending draft now (called on buffer switch, background, send). */
+    fun flushDraft(buffer: Buffer) {
+        val networkId = buffer.networkId ?: return
+        val key = buffer.key
+        draftFlush.remove(key)?.let(main::removeCallbacks)
+        if (key !in draftPending) return
+        draftPending.remove(key)
+        val body = drafts[key].orEmpty()
+        ws?.send(
+            JSONObject().put("networkId", networkId).put("target", buffer.target).apply {
+                if (body.isEmpty()) put("type", "draft-clear")
+                else put("type", "draft-set").put("body", body)
+            }.toString(),
+        )
+    }
+
+    /** Record a submitted line in the per-buffer history (server-synced + local). */
+    fun addInputHistory(buffer: Buffer, text: String) {
+        val networkId = buffer.networkId ?: return
+        if (text.isBlank()) return
+        inputHistory[buffer.key] = (inputHistory[buffer.key] ?: emptyList()) + text
+        ws?.send(
+            JSONObject().put("type", "input-history-add")
+                .put("networkId", networkId).put("target", buffer.target).put("text", text)
+                .toString(),
+        )
+    }
+
+    // ---- Aliases (fork-only) ------------------------------------------------
+
+    private fun applyAliases(arr: JSONArray?) {
+        if (arr == null) return
+        val list = (0 until arr.length()).mapNotNull { i ->
+            val a = arr.optJSONObject(i) ?: return@mapNotNull null
+            AliasEntry(a.optInt("id"), a.optString("name"), a.optString("expansion"))
+        }
+        aliases.clear(); aliases.addAll(list)
+    }
+
+    fun addAlias(name: String, expansion: String) {
+        ws?.send(JSONObject().put("type", "add-alias").put("name", name).put("expansion", expansion).toString())
+    }
+
+    fun removeAlias(id: Int) {
+        ws?.send(JSONObject().put("type", "remove-alias").put("id", id).toString())
     }
 
     private fun markRead(buffer: Buffer) {

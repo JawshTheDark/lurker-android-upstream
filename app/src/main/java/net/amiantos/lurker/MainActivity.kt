@@ -477,6 +477,7 @@ private fun BufferListBody(
                                 buffer = buffer,
                                 unread = client.unread[buffer.key] ?: 0,
                                 highlight = (client.highlights[buffer.key] ?: 0) > 0,
+                                hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
                                 onClick = { onOpen(buffer) },
                                 onClose = if (buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.execute(buffer, listOf(WireOp("close"))) }
@@ -525,6 +526,7 @@ private fun BufferRow(
     buffer: Buffer,
     unread: Int,
     highlight: Boolean,
+    hasDraft: Boolean = false,
     onClick: () -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
@@ -558,6 +560,10 @@ private fun BufferRow(
             fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal,
             modifier = Modifier.weight(1f),
         )
+        if (hasDraft) {
+            Text("✎", color = TextSecondary, fontSize = 14.sp)
+            Spacer(Modifier.width(8.dp))
+        }
         if (unread > 0) {
             UnreadBadge(unread, highlight)
             Spacer(Modifier.width(8.dp))
@@ -645,7 +651,14 @@ private fun ChatScreen(
     onOpenBuffer: (Buffer) -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    var draft by remember { mutableStateOf(TextFieldValue("")) }
+    // Seed the composer from the server-synced draft when the buffer opens.
+    var draft by remember(buffer.key) {
+        mutableStateOf(TextFieldValue(client.drafts[buffer.key] ?: ""))
+    }
+    // Input-history recall cursor: null = live draft, else index into history.
+    var historyIdx by remember(buffer.key) { mutableStateOf<Int?>(null) }
+    // Flush the draft when leaving this buffer.
+    DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
@@ -986,11 +999,14 @@ private fun ChatScreen(
                     val newText = before + insert + after
                     return TextFieldValue(newText, TextRange(before.length + insert.length))
                 }
+                val history = client.inputHistory[buffer.key] ?: emptyList()
                 Composer(
                     draft = draft,
                     onChange = { new ->
                         val hadText = draft.text.isNotBlank()
                         draft = new
+                        historyIdx = null // editing exits history recall
+                        client.setDraftLocal(buffer, new.text)
                         val hasText = new.text.isNotBlank()
                         // Commands never broadcast composing state.
                         if (hasText && !new.text.startsWith("/")) {
@@ -1003,11 +1019,26 @@ private fun ChatScreen(
                     uploading = client.uploading,
                     onAttach = { uploadPicker.launch("*/*") },
                     suggestions = suggestions,
-                    onPickSuggestion = { draft = applySuggestion(it) },
+                    onPickSuggestion = { draft = applySuggestion(it); client.setDraftLocal(buffer, draft.text) },
+                    canRecall = history.isNotEmpty(),
+                    onRecall = {
+                        if (history.isEmpty()) return@Composer
+                        val next = when (val i = historyIdx) {
+                            null -> history.lastIndex
+                            else -> (i - 1).coerceAtLeast(0)
+                        }
+                        historyIdx = next
+                        val line = history[next]
+                        draft = TextFieldValue(line, TextRange(line.length))
+                    },
                 ) {
-                    val text = draft.text.trim()
-                    if (text.isEmpty()) return@Composer
+                    val raw = draft.text.trim()
+                    if (raw.isEmpty()) return@Composer
                     client.notifyTyping(buffer, active = false)
+                    client.addInputHistory(buffer, raw)
+                    historyIdx = null
+                    val myNick = buffer.networkId?.let { client.networks[it]?.nick }
+                    val text = Commands.expandAlias(raw, client.aliases, myNick, buffer.target)
                     when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
                         is ParsedInput.Ops -> {
                             client.execute(buffer, parsed.ops)
@@ -1018,6 +1049,7 @@ private fun ChatScreen(
                         is ParsedInput.Local -> client.localNotice(buffer, parsed.message)
                     }
                     draft = TextFieldValue("")
+                    client.setDraftLocal(buffer, "") // clears + syncs draft-clear
                 }
             }
         }
@@ -1782,6 +1814,8 @@ private fun Composer(
     onAttach: (() -> Unit)? = null,
     suggestions: List<String> = emptyList(),
     onPickSuggestion: (String) -> Unit = {},
+    canRecall: Boolean = false,
+    onRecall: () -> Unit = {},
     onSend: () -> Unit,
 ) {
     var showFormat by remember { mutableStateOf(false) }
@@ -1828,6 +1862,11 @@ private fun Composer(
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
                 )
+            }
+            if (canRecall) {
+                TextButton(onClick = onRecall) {
+                    Text("↑", color = TextSecondary, fontSize = 18.sp)
+                }
             }
             TextField(
                 value = draft,
@@ -2065,6 +2104,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { Spacer(Modifier.height(8.dp)) }
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
+                item { AliasesCard(client) } // FORK-ONLY (stripped from public build)
                 items(orderedCategories.size) { i ->
                     val cat = orderedCategories[i]
                     val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
@@ -2141,7 +2181,53 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
     }
 }
 
-/** Local (device-only) look selector — not a server registry setting. */
+// FORK-ONLY: custom server-synced aliases (stripped from the public build).
+@Composable
+private fun AliasesCard(client: LurkerClient) {
+    var adding by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var expansion by remember { mutableStateOf("") }
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.padding(16.dp, 12.dp)) {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Aliases", fontSize = 17.sp)
+                    Text("Custom /commands ($1..$9, \$me, \$chan)", color = TextSecondary, fontSize = 12.sp)
+                }
+                TextButton(onClick = { adding = !adding }) { Text(if (adding) "Cancel" else "Add", color = AccentBlue) }
+            }
+            if (adding) {
+                OutlinedTextField(name, { name = it.trimStart('/').trim() }, label = { Text("name (e.g. wave)") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                OutlinedTextField(expansion, { expansion = it }, label = { Text("expansion (e.g. /me waves at \$1)") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                Button(
+                    onClick = {
+                        if (name.isNotBlank() && expansion.isNotBlank()) {
+                            client.addAlias(name.trim(), expansion.trim())
+                            name = ""; expansion = ""; adding = false
+                        }
+                    },
+                    enabled = name.isNotBlank() && expansion.isNotBlank(),
+                    modifier = Modifier.padding(top = 8.dp),
+                ) { Text("Save alias") }
+            }
+            client.aliases.forEach { a ->
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("/${a.name}", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text(a.expansion, color = TextSecondary, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { client.removeAlias(a.id) }) { Text("Delete", color = AlertRed, fontSize = 13.sp) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun InlineMediaCard(prefs: Prefs) {
     Surface(

@@ -126,4 +126,23 @@ class CommandsTest {
         val r = Commands.parse("/nick x", "#chan", hasNetwork = false)
         assertTrue(r is ParsedInput.Local && r.isError)
     }
+
+    @Test
+    fun aliasExpandsPositionalAndChan() {
+        val a = listOf(AliasEntry(1, "wave", "/me waves at \$1 in \$chan"))
+        assertEquals("/me waves at bob in #lurker",
+            Commands.expandAlias("/wave bob", a, "me", "#lurker"))
+    }
+
+    @Test
+    fun aliasNoParamAppendsArgs() {
+        val a = listOf(AliasEntry(1, "j", "/join"))
+        assertEquals("/join #test", Commands.expandAlias("/j #test", a, "me", "#x"))
+    }
+
+    @Test
+    fun nonAliasUnchanged() {
+        assertEquals("/whois bob", Commands.expandAlias("/whois bob", emptyList(), "me", "#x"))
+    }
+
 }
