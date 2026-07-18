@@ -38,3 +38,11 @@ google-services.json
 
 # macOS
 .DS_Store
+
+# Release signing + Play assets (NEVER commit)
+keystore/
+keystore.properties
+*.jks
+*.keystore
+play_assets/
+PLAY_LISTING.md
