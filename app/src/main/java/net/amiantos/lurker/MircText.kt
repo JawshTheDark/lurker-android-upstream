@@ -20,7 +20,11 @@ import androidx.compose.ui.text.withStyle
  * them into an AnnotatedString, and overlays clickable link annotations on any
  * URLs. Kept out of Mirc.kt so the parser stays a pure, unit-testable module.
  */
-fun mircAnnotated(raw: String, linkColor: Color): AnnotatedString {
+fun mircAnnotated(
+    raw: String,
+    linkColor: Color,
+    onLink: ((String) -> Unit)? = null,
+): AnnotatedString {
     val spans = Mirc.parse(raw)
     val plain = buildString { spans.forEach { append(it.text) } }
     val urls = Mirc.findUrls(plain)
@@ -42,7 +46,14 @@ fun mircAnnotated(raw: String, linkColor: Color): AnnotatedString {
             SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
         )
         for (r in urls) {
-            addLink(LinkAnnotation.Url(plain.substring(r), linkStyle), r.first, r.last + 1)
+            val url = plain.substring(r)
+            val link = if (onLink != null) {
+                // Custom routing (in-app viewers); default handling otherwise.
+                LinkAnnotation.Url(url, linkStyle) { onLink(url) }
+            } else {
+                LinkAnnotation.Url(url, linkStyle)
+            }
+            addLink(link, r.first, r.last + 1)
         }
     }
 }

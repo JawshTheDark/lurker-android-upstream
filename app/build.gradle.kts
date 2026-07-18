@@ -51,6 +51,8 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.haze)
     implementation(libs.haze.materials)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -129,6 +129,19 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil.ImageLoader
+import coil.compose.AsyncImage
+import coil.decode.ImageDecoderDecoder
+import coil.request.ImageRequest
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
@@ -662,6 +675,33 @@ private fun ChatScreen(
     val loadingOlder = client.loadingOlder[buffer.key] == true
     val typers = client.typing[buffer.key]?.keys?.sorted() ?: emptyList()
     var joinPrompt by remember { mutableStateOf<String?>(null) }
+    var viewerUrl by remember { mutableStateOf<String?>(null) }
+    val uriHandler = LocalUriHandler.current
+    // Route taps: images open the in-app viewer, av media goes to the system
+    // player picker, everything else to the browser.
+    val openLink: (String) -> Unit = { url ->
+        val clean = url.substringBefore('?').substringBefore('#').lowercase()
+        when {
+            IMAGE_EXTS.any { clean.endsWith(it) } -> viewerUrl = url
+            MEDIA_EXTS.any { clean.endsWith(it) } -> {
+                try {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(
+                                Uri.parse(url),
+                                if (AUDIO_EXTS.any { clean.endsWith(it) }) "audio/*" else "video/*",
+                            )
+                        },
+                    )
+                } catch (_: Exception) {
+                    uriHandler.openUri(url)
+                }
+            }
+            else -> uriHandler.openUri(url)
+        }
+    }
+
+    viewerUrl?.let { url -> ImageViewerDialog(url, onClose = { viewerUrl = null }) }
 
     // Reveal the ghost bubble only when already reading the tail.
     LaunchedEffect(typers.isNotEmpty()) {
@@ -763,8 +803,8 @@ private fun ChatScreen(
             }
             items(rows.size) { i ->
                 when (val row = rows[i]) {
-                    is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last, baseSize)
-                    is ChatRow.Action -> ActionLine(row.msg, baseSize)
+                    is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last, baseSize, openLink)
+                    is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
                         row.msg,
                         onJoin = if (buffer.networkId != null) {
@@ -1114,7 +1154,13 @@ private fun readUpload(
 }
 
 @Composable
-private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean, baseSize: Int) {
+private fun MessageBubble(
+    msg: Msg,
+    first: Boolean,
+    last: Boolean,
+    baseSize: Int,
+    onLink: ((String) -> Unit)? = null,
+) {
     val self = msg.self
     // Grouping reads through the corners: the shared edge between messages of
     // one group is tightened, the outside stays fully rounded.
@@ -1154,7 +1200,7 @@ private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean, baseSize: Int
                 .background(paintedBg ?: if (self) AccentBlue else SurfaceRaised, shape)
                 .padding(horizontal = 13.dp, vertical = 7.dp),
         ) {
-            val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue)
+            val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink)
             Text(
                 if (msg.type == "error") buildAnnotatedString {
                     withStyle(SpanStyle(color = AlertRed)) { append(body) }
@@ -1184,13 +1230,13 @@ private fun MessageBubble(msg: Msg, first: Boolean, last: Boolean, baseSize: Int
 }
 
 @Composable
-private fun ActionLine(msg: Msg, baseSize: Int = 16) {
+private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)? = null) {
     val line = buildAnnotatedString {
         withStyle(SpanStyle(color = TextSecondary, fontStyle = FontStyle.Italic)) { append("* ") }
         withStyle(
             SpanStyle(color = nickColor(msg.nick), fontStyle = FontStyle.Italic, fontWeight = FontWeight.SemiBold),
         ) { append(msg.nick) }
-        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(" ") ; append(mircAnnotated(msg.text, AccentBlue)) }
+        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(" ") ; append(mircAnnotated(msg.text, AccentBlue, onLink)) }
     }
     Text(
         line,
@@ -1201,6 +1247,72 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16) {
 }
 
 private val CHANNEL_RE = Regex("""#[^\s,]+""")
+
+private val IMAGE_EXTS = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif")
+private val VIDEO_EXTS = listOf(".mp4", ".webm", ".mkv", ".mov", ".m4v")
+private val AUDIO_EXTS = listOf(".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a")
+private val MEDIA_EXTS = VIDEO_EXTS + AUDIO_EXTS
+
+/**
+ * Full-screen in-app image viewer: pinch to zoom, drag to pan, GIFs animate.
+ * Escape hatches: open in browser, or ✕ / back to close.
+ */
+@Composable
+private fun ImageViewerDialog(url: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val loader = remember {
+        ImageLoader.Builder(context)
+            .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP
+            .build()
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        var scale by remember { mutableStateOf(1f) }
+        var offset by remember { mutableStateOf(Offset.Zero) }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.96f))
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 6f)
+                        offset = if (scale > 1f) offset + pan else Offset.Zero
+                    }
+                },
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
+                imageLoader = loader,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    },
+            )
+            Row(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp),
+            ) {
+                TextButton(onClick = { uriHandler.openUri(url) }) {
+                    Text("Browser", color = Color.White.copy(alpha = 0.85f), fontSize = 14.sp)
+                }
+                TextButton(onClick = onClose) {
+                    Text("✕", color = Color.White, fontSize = 20.sp)
+                }
+            }
+        }
+    }
+}
 
 /** iMessage-style "someone is composing" bubble with three breathing dots. */
 @Composable
