@@ -1491,10 +1491,10 @@ private fun MessageBubble(
         if (Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
-                if (kind == MediaKind.AUDIO) {
-                    InlineAudioPlayer(url)
-                } else {
-                    MediaEmbed(url, kind, onOpen = { onLink(url) }, onLoaded = onMediaLoaded)
+                when (kind) {
+                    MediaKind.AUDIO -> InlineAudioPlayer(url)
+                    MediaKind.VIDEO -> InlineVideoPlayer(url)
+                    MediaKind.IMAGE -> MediaEmbed(url, onOpen = { onLink(url) }, onLoaded = onMediaLoaded)
                 }
             }
         }
@@ -1554,63 +1554,70 @@ private fun rememberEmbedLoader(): coil.ImageLoader {
 }
 
 /**
- * An inline media card in a chat bubble. Images take the picture's own aspect
- * ratio (scaled to fit, never cropped), bounded so a tall portrait can't run
- * away; video shows a 16:9 play card (no remote frame fetch). The card resizes
- * when the image loads, so [onLoaded] lets the chat re-pin to the tail — that
- * keeps the tail-follow / load-older anchoring stable despite the size change.
+ * An inline image card in a chat bubble. Takes the picture's own aspect ratio
+ * (scaled to fit, never cropped), bounded so a tall portrait can't run away;
+ * only extreme aspects letterbox. The card resizes when the image loads, so
+ * [onLoaded] lets the chat re-pin to the tail — that keeps the tail-follow /
+ * load-older anchoring stable despite the size change.
  */
 @Composable
-private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit, onLoaded: () -> Unit = {}) {
-    if (kind == MediaKind.IMAGE) {
-        // Real aspect once known; a landscape default reserves sane space first.
-        var ratio by remember(url) { mutableStateOf<Float?>(null) }
-        BoxWithConstraints(Modifier.padding(top = 6.dp).fillMaxWidth()) {
-            // Card takes the picture's own shape (width / aspect), bounded so a
-            // tall portrait can't run off-screen. Within the bound the whole
-            // image shows; only extreme aspects letterbox.
-            val h = (maxWidth / (ratio ?: 1.6f)).coerceIn(80.dp, 360.dp)
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(h)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(CanvasBlack)
-                    .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpen),
-                contentAlignment = Alignment.Center,
-            ) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current).data(url).build(),
-                    imageLoader = rememberEmbedLoader(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    onSuccess = { st ->
-                        val d = st.result.drawable
-                        if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) {
-                            ratio = d.intrinsicWidth.toFloat() / d.intrinsicHeight
-                        }
-                        onLoaded()
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        }
-    } else {
+private fun MediaEmbed(url: String, onOpen: () -> Unit, onLoaded: () -> Unit = {}) {
+    // Real aspect once known; a landscape default reserves sane space first.
+    var ratio by remember(url) { mutableStateOf<Float?>(null) }
+    BoxWithConstraints(Modifier.padding(top = 6.dp).fillMaxWidth()) {
+        val h = (maxWidth / (ratio ?: 1.6f)).coerceIn(80.dp, 360.dp)
         Box(
             Modifier
-                .padding(top = 6.dp)
                 .fillMaxWidth()
-                .aspectRatio(1.78f)
-                .heightIn(max = 300.dp)
+                .height(h)
                 .clip(RoundedCornerShape(12.dp))
                 .background(CanvasBlack)
                 .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
                 .clickable(onClick = onOpen),
             contentAlignment = Alignment.Center,
         ) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(url).build(),
+                imageLoader = rememberEmbedLoader(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                onSuccess = { st ->
+                    val d = st.result.drawable
+                    if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) {
+                        ratio = d.intrinsicWidth.toFloat() / d.intrinsicHeight
+                    }
+                    onLoaded()
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+/**
+ * Inline video player in a chat bubble. Shows a 16:9 poster with a ▶ until
+ * tapped, then plays in place with ExoPlayer's standard transport controls —
+ * no full-screen hop. Created lazily and released on dispose, so a video link
+ * costs nothing until the user actually plays it.
+ */
+@Composable
+private fun InlineVideoPlayer(url: String) {
+    var started by remember(url) { mutableStateOf(false) }
+    Box(
+        Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth()
+            .aspectRatio(1.78f)
+            .heightIn(max = 300.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(CanvasBlack)
+            .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
+            .then(if (!started) Modifier.clickable { started = true } else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!started) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("▶", color = Color.White, fontSize = 34.sp)
+                Text("▶", color = Color.White, fontSize = 40.sp)
                 Text(
                     url.substringAfterLast('/').substringBefore('?').take(40),
                     color = TextSecondary,
@@ -1618,6 +1625,26 @@ private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit, onLoade
                     modifier = Modifier.padding(top = 6.dp, start = 12.dp, end = 12.dp),
                 )
             }
+        } else {
+            val context = LocalContext.current
+            val player = remember(url) {
+                ExoPlayer.Builder(context).build().apply {
+                    setMediaItem(MediaItem.fromUri(url))
+                    prepare()
+                    playWhenReady = true
+                }
+            }
+            DisposableEffect(player) { onDispose { player.release() } }
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        setShowNextButton(false)
+                        setShowPreviousButton(false)
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }
