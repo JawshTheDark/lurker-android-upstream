@@ -2194,6 +2194,24 @@ private val GROUP_LABELS = mapOf(
     "alerts" to "Alerts", "push_filters" to "Push filters", "pipeline" to "Image pipeline",
 )
 
+/**
+ * Registry settings that only steer the *web* client and do nothing here are
+ * hidden, so the mobile settings screen shows only what actually affects this
+ * app or the account server-side. Server behaviors (chat filters, away, ctcp,
+ * uploads, dcc, channel, push) still apply to mobile via the server, so they
+ * stay. Everything under `look.*` styles the web renderer — mobile has its own
+ * themes — except the one mobile font-size key it honors.
+ */
+private fun settingHiddenOnMobile(key: String): Boolean = when {
+    key == "look.font.size.mobile" -> false      // the only look.* the mobile UI reads
+    key.startsWith("look.") -> true              // fonts, palette, desktop layout, bars
+    key.startsWith("input.") -> true             // web input-box prefs; Android uses the system IME
+    key.contains(".sound.") -> true              // web notification audio; Android uses channels
+    key == "chat.image_modal.enabled" -> true    // web lightbox; mobile has its own media viewer
+    key == "uploads.paste.enabled" -> true       // web clipboard paste
+    else -> false
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Unit) {
@@ -2202,7 +2220,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
 
     val byCategory = remember(client.settingsRegistry.toList()) {
         client.settingsRegistry
-            .filter { it.category.isNotEmpty() && it.category != "system" }
+            .filter { it.category.isNotEmpty() && it.category != "system" && !settingHiddenOnMobile(it.key) }
             .groupBy { it.category }
     }
     val orderedCategories = remember(byCategory) {
