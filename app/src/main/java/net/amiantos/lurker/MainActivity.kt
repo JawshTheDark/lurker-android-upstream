@@ -226,10 +226,6 @@ class MainActivity : ComponentActivity() {
                     Screen.Settings -> SettingsScreen(client, prefs) { screen = Screen.Buffers }
                     Screen.Dcc -> DccScreen(
                         client = client,
-                        onOpenBuffer = { buffer ->
-                            client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
-                        },
                         onBack = { screen = Screen.Buffers },
                     )
                     Screen.Networks -> NetworksScreen(
@@ -668,22 +664,6 @@ private fun ChatScreen(
         uploadIntoDraft(uri)
     }
 
-    // DCC send: remember who we're sending to across the system file picker.
-    var dccNick by remember { mutableStateOf<String?>(null) }
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val nick = dccNick
-        dccNick = null
-        val networkId = buffer.networkId
-        if (uri != null && nick != null && networkId != null) {
-            val upload = readUpload(context, uri)
-            if (upload == null) {
-                client.dccError = "Couldn't read that file."
-            } else {
-                client.dccSendFile(networkId, nick, upload.first, upload.second)
-            }
-        }
-    }
-
     val showLoadOlder = client.hasMoreOlder[buffer.key] == true && buffer.networkId != null
     val loadingOlder = client.loadingOlder[buffer.key] == true
     val typers = client.typing[buffer.key]?.keys?.sorted() ?: emptyList()
@@ -1039,11 +1019,6 @@ private fun ChatScreen(
             buffer = buffer,
             onDismiss = { showMembers = false },
             onOpenBuffer = { showMembers = false; onOpenBuffer(it) },
-            onPickFileFor = { nick ->
-                dccNick = nick
-                showMembers = false
-                filePicker.launch("*/*")
-            },
         )
     }
 
@@ -1136,7 +1111,6 @@ private fun MemberSheet(
     buffer: Buffer,
     onDismiss: () -> Unit,
     onOpenBuffer: (Buffer) -> Unit,
-    onPickFileFor: (String) -> Unit,
 ) {
     var selected by remember { mutableStateOf<Member?>(null) }
     ModalBottomSheet(
@@ -1207,7 +1181,6 @@ private fun MemberSheet(
                 onBack = { selected = null },
                 onDone = onDismiss,
                 onOpenBuffer = onOpenBuffer,
-                onPickFileFor = onPickFileFor,
             )
         }
     }
@@ -1222,7 +1195,6 @@ private fun MemberActions(
     onBack: () -> Unit,
     onDone: () -> Unit,
     onOpenBuffer: (Buffer) -> Unit,
-    onPickFileFor: (String) -> Unit,
 ) {
     val networkId = buffer.networkId ?: return
     val nick = member.nick
@@ -1252,11 +1224,6 @@ private fun MemberActions(
         SheetAction("Whois") { raw("WHOIS $nick") }
         SheetAction("Send a message") {
             onOpenBuffer(client.focusTarget(networkId, nick))
-        }
-        SheetAction("DCC: send a file…") { onPickFileFor(nick) }
-        SheetAction("DCC: start a chat") {
-            client.dccChat(networkId, nick, open = true)
-            onOpenBuffer(client.focusTarget(networkId, "=$nick"))
         }
         if (canModerate) {
             HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 6.dp))
@@ -1976,8 +1943,6 @@ private val CATEGORY_META = listOf(
     "uploads" to "Uploads",
     "notifications" to "Notifications",
     "away" to "Away",
-    "fserve" to "File server",
-    "dcc" to "DCC transfers",
 )
 
 // Group headers, mirroring the GROUPS map in shared/settingsRegistry.ts.
@@ -1992,10 +1957,6 @@ private val GROUP_LABELS = mapOf(
     "system_features" to "System text features", "autocomplete" to "Autocomplete",
     "formatting" to "Formatting", "auto-away" to "Auto-away",
     "alerts" to "Alerts", "push_filters" to "Push filters", "pipeline" to "Image pipeline",
-    "fserve" to "File server", "fserve-queue" to "Queue & sends",
-    "fserve-ads" to "Advertising", "fserve-find" to "Search (@find)",
-    "fserve-files" to "File filters",
-    "dcc-incoming" to "Incoming", "dcc-outgoing" to "Outgoing", "dcc-notify" to "Notifications",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2553,7 +2514,7 @@ private fun FormField(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DccScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
+private fun DccScreen(client: LurkerClient, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -2581,7 +2542,6 @@ private fun DccScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBa
             client.dccError?.let { err ->
                 item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
             }
-            item { DccStartCard(client, onOpenBuffer) }
             if (transfers.isEmpty()) {
                 item { Text("No transfers.", Modifier.padding(16.dp), color = TextSecondary) }
             }
@@ -2591,95 +2551,13 @@ private fun DccScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBa
     }
 }
 
-/** Start an outgoing DCC send or chat: pick a network, type a nick, go. */
-@Composable
-private fun DccStartCard(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit) {
-    val context = LocalContext.current
-    var nick by remember { mutableStateOf("") }
-    val connected = client.networks.values.filter { it.connected }
-    var networkId by remember(connected.map { it.id }) {
-        mutableStateOf(connected.firstOrNull()?.id)
-    }
-    var netMenu by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val id = networkId
-        val who = nick.trim()
-        if (uri != null && id != null && who.isNotEmpty()) {
-            val upload = readUpload(context, uri)
-            if (upload == null) {
-                client.dccError = "Couldn't read that file."
-            } else {
-                client.dccSendFile(id, who, upload.first, upload.second)
-            }
-        }
-    }
-
-    Surface(
-        color = SurfaceDark,
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(0.5.dp, GlassBorder),
-        modifier = Modifier.fillMaxWidth().padding(16.dp, 8.dp),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Start a transfer or chat", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Box {
-                    TextButton(onClick = { netMenu = true }) {
-                        Text(
-                            connected.firstOrNull { it.id == networkId }?.name ?: "No network",
-                            color = AccentBlue,
-                        )
-                    }
-                    DropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
-                        connected.forEach { n ->
-                            DropdownMenuItem(
-                                text = { Text(n.name) },
-                                onClick = { networkId = n.id; netMenu = false },
-                            )
-                        }
-                    }
-                }
-                TextField(
-                    value = nick,
-                    onValueChange = { nick = it },
-                    placeholder = { Text("nick", color = TextSecondary) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = SurfaceRaised,
-                        unfocusedContainerColor = SurfaceRaised,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        cursorColor = AccentBlue,
-                    ),
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { picker.launch("*/*") },
-                    enabled = networkId != null && nick.isNotBlank(),
-                ) { Text("Send a file…") }
-                TextButton(
-                    onClick = {
-                        val id = networkId ?: return@TextButton
-                        val who = nick.trim()
-                        client.dccChat(id, who, open = true)
-                        onOpenBuffer(client.focusTarget(id, "=$who"))
-                    },
-                    enabled = networkId != null && nick.isNotBlank(),
-                ) { Text("Start a chat") }
-            }
-        }
-    }
-}
 
 @Composable
 private fun TransferRow(client: LurkerClient, t: DccTransfer) {
     Column(Modifier.fillMaxWidth().padding(16.dp, 10.dp)) {
         Text(t.filename, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
         Text(
-            "${if (t.isSend) "to" else "from"} ${t.peerNick} · ${t.state}" + (t.error?.let { " · $it" } ?: ""),
+            "from ${t.peerNick} · ${t.state}" + (t.error?.let { " · $it" } ?: ""),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
         )
