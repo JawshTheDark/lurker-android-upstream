@@ -495,9 +495,13 @@ private fun BufferListBody(
                                 highlight = (client.highlights[buffer.key] ?: 0) > 0,
                                 hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
                                 pinned = client.isPinned(buffer),
+                                notifyAll = client.isNotifyAlways(buffer),
                                 onTogglePin = if (buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
+                                onToggleNotify = if (buffer.isChannel) {
+                                    { client.setNotifyAlways(buffer, !client.isNotifyAlways(buffer)) }
+                                } else null,
                                 onClick = { onOpen(buffer) },
                                 onClose = if (buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.execute(buffer, listOf(WireOp("close"))) }
@@ -556,7 +560,9 @@ private fun BufferRow(
     highlight: Boolean,
     hasDraft: Boolean = false,
     pinned: Boolean = false,
+    notifyAll: Boolean = false,
     onTogglePin: (() -> Unit)? = null,
+    onToggleNotify: (() -> Unit)? = null,
     onClick: () -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
@@ -567,6 +573,12 @@ private fun BufferRow(
                 DropdownMenuItem(
                     text = { Text(if (pinned) "Unpin" else "Pin to top") },
                     onClick = { menu = false; onTogglePin() },
+                )
+            }
+            if (onToggleNotify != null) {
+                DropdownMenuItem(
+                    text = { Text(if (notifyAll) "Notify: highlights only" else "Notify on every message") },
+                    onClick = { menu = false; onToggleNotify() },
                 )
             }
             if (onClose != null) {
@@ -1312,9 +1324,28 @@ private fun MemberActions(
     val networkId = buffer.networkId ?: return
     val nick = member.nick
     val chan = buffer.target
+    var editNote by remember { mutableStateOf(false) }
+    var noteText by remember(nick) { mutableStateOf(client.nickNote(networkId, nick) ?: "") }
     fun raw(line: String) {
         client.execute(buffer, listOf(WireOp("raw", line = line)))
         onDone()
+    }
+
+    if (editNote) {
+        AlertDialog(
+            onDismissRequest = { editNote = false },
+            containerColor = SurfaceRaised,
+            title = { Text("Note on $nick", color = TextPrimary) },
+            text = {
+                OutlinedTextField(noteText, { noteText = it }, placeholder = { Text("e.g. lives in Berlin") }, modifier = Modifier.fillMaxWidth())
+            },
+            confirmButton = {
+                TextButton(onClick = { client.setNickNote(networkId, nick, noteText); editNote = false }) {
+                    Text("Save", color = AccentBlue, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { editNote = false }) { Text("Cancel", color = TextSecondary) } },
+        )
     }
 
     Column(Modifier.padding(bottom = 24.dp)) {
@@ -1334,10 +1365,15 @@ private fun MemberActions(
                 Text(it, color = TextSecondary, fontSize = 12.sp)
             }
         }
+        client.nickNote(networkId, nick)?.let { note ->
+            Text("📝 $note", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 26.dp, vertical = 4.dp))
+        }
         SheetAction("Whois") { raw("WHOIS $nick") }
         SheetAction("Send a message") {
             onOpenBuffer(client.focusTarget(networkId, nick))
         }
+        SheetAction(if (client.nickNote(networkId, nick) != null) "Edit note" else "Add note") { editNote = true }
+        SheetAction("Ignore", danger = true) { client.addIgnore(networkId, member.banMask); onDone() }
         SheetAction("DCC: send a file…") { onPickFileFor(nick) }
         SheetAction("DCC: start a chat") {
             client.dccChat(networkId, nick, open = true)

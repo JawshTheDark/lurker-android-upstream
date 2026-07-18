@@ -75,6 +75,12 @@ class LurkerClient {
     /** networkId -> pinned buffer targets, in user order. */
     val pins = mutableStateMapOf<Int, List<String>>()
 
+    /** "networkId::nick" -> free-form nick note. */
+    val nickNotes = mutableStateMapOf<String, String>()
+
+    /** "networkId::#target" -> notify-always flag. */
+    val notifyAlways = mutableStateMapOf<String, Boolean>()
+
     // Channel-list browser (/LIST) state for the currently-viewed network.
     val chanlistRows = mutableStateListOf<ChannelListing>()
     var chanlistLoading by mutableStateOf(false)
@@ -254,6 +260,8 @@ class LurkerClient {
             inputHistory.clear()
             aliases.clear()
             pins.clear()
+            nickNotes.clear()
+            notifyAlways.clear()
             chanlistRows.clear()
             searchResults.clear()
             highlightItems.clear()
@@ -615,6 +623,15 @@ class LurkerClient {
                     pins[networkId] = if (p == null) emptyList() else (0 until p.length()).map { p.optString(it) }
                 }
             }
+            "channel-notify-changed" -> {
+                val key = "${frame.optInt("networkId")}::${frame.optString("target")}"
+                if (frame.optBoolean("notifyAlways")) notifyAlways[key] = true else notifyAlways.remove(key)
+            }
+            "nick-note-updated" -> {
+                val key = "${frame.optInt("networkId")}::${frame.optString("nick").lowercase()}"
+                val note = frame.optString("note")
+                if (note.isEmpty()) nickNotes.remove(key) else nickNotes[key] = note
+            }
 
             "chanlist-result" -> {
                 val networkId = frame.optInt("networkId", -1)
@@ -717,6 +734,20 @@ class LurkerClient {
             // Per-network pinned buffers, in the user's chosen order.
             n.optJSONArray("pinned")?.let { p ->
                 pins[id] = (0 until p.length()).map { p.optString(it) }
+            }
+            // Nick notes: {nick, note} rows keyed by (networkId, nick).
+            n.optJSONArray("nickNotes")?.let { notes ->
+                for (i in 0 until notes.length()) {
+                    val nt = notes.optJSONObject(i) ?: continue
+                    val nk = nt.optString("nick"); val body = nt.optString("note")
+                    if (nk.isNotEmpty() && body.isNotEmpty()) nickNotes["$id::${nk.lowercase()}"] = body
+                }
+            }
+            // channelNotify: { "#target": { notifyAlways } }.
+            n.optJSONObject("channelNotify")?.let { cn ->
+                for (t in cn.keys()) {
+                    if (cn.optJSONObject(t)?.optBoolean("notifyAlways") == true) notifyAlways["$id::$t"] = true
+                }
             }
             // The snapshot carries each channel's member roster inline.
             n.optJSONArray("channels")?.let { chans ->
@@ -1078,6 +1109,8 @@ class LurkerClient {
     }
 
     private fun parseEvent(e: JSONObject): Msg? {
+        // The server flags ignored-sender lines; we drop them (client-filtered).
+        if (e.optBoolean("fromIgnored", false)) return null
         val type = e.optString("type")
         val id = e.optLong("id")
         val nick = e.optString("nick", "*")
@@ -1552,6 +1585,31 @@ class LurkerClient {
 
     fun markAllRead() {
         ws?.send(JSONObject().put("type", "mark-all-read").toString())
+    }
+
+    // ---- Notify, notes, ignore ---------------------------------------------
+
+    fun nickNote(networkId: Int?, nick: String): String? =
+        networkId?.let { nickNotes["$it::${nick.lowercase()}"] }
+
+    fun setNickNote(networkId: Int, nick: String, note: String) {
+        val key = "$networkId::${nick.lowercase()}"
+        if (note.isBlank()) nickNotes.remove(key) else nickNotes[key] = note
+        ws?.send(JSONObject().put("type", "set-nick-note").put("networkId", networkId).put("nick", nick).put("note", note).toString())
+    }
+
+    fun isNotifyAlways(buffer: Buffer): Boolean =
+        buffer.networkId?.let { notifyAlways["$it::${buffer.target}"] } == true
+
+    fun setNotifyAlways(buffer: Buffer, on: Boolean) {
+        val networkId = buffer.networkId ?: return
+        if (on) notifyAlways["$networkId::${buffer.target}"] = true else notifyAlways.remove("$networkId::${buffer.target}")
+        ws?.send(JSONObject().put("type", "set-channel-notify-always").put("networkId", networkId).put("target", buffer.target).put("notifyAlways", on).toString())
+    }
+
+    /** Add a simple ALL-level ignore for [mask] (bare-mask rule the server accepts). */
+    fun addIgnore(networkId: Int, mask: String) {
+        ws?.send(JSONObject().put("type", "add-ignore").put("networkId", networkId).put("mask", mask).toString())
     }
 
     /** Kick a fresh /LIST refresh on a network and load its cached rows. */
