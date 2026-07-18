@@ -250,10 +250,14 @@ class LurkerClient {
     fun onForeground() {
         if (!loggedIn || token == null) return
         val now = System.currentTimeMillis()
-        val backgroundedLong = wentBackgroundAt > 0 && now - wentBackgroundAt > BACKGROUND_CYCLE_MS
-        val socketQuiet = now - lastFrameAt > STALE_SOCKET_MS
+        // Deterministic by design: any real background trip cycles the socket —
+        // no liveness guessing, no zombie-socket class of bugs. ?since= resume
+        // makes it cheap, and superseded-socket guards keep the UI steady. Only
+        // sub-3s task-switcher hops skip the churn (if their socket died, the
+        // normal failure path still reconnects instantly).
+        val quickHop = wentBackgroundAt > 0 && now - wentBackgroundAt < BACKGROUND_CYCLE_MS
         wentBackgroundAt = 0
-        if (!connected || (backgroundedLong && socketQuiet)) {
+        if (!connected || !quickHop) {
             backoffMs = INITIAL_BACKOFF
             cancelScheduledReconnect()
             connecting = false
@@ -1382,11 +1386,8 @@ class LurkerClient {
         /** How long an `active` typing signal lives without a refresh. */
         const val TYPING_TTL = 6_000L
 
-        /** Background longer than this + a quiet socket -> proactive cycle. */
-        const val BACKGROUND_CYCLE_MS = 30_000L
-
-        /** No frame for this long = the socket can't be trusted (ping is 30s). */
-        const val STALE_SOCKET_MS = 45_000L
+        /** Backgrounds shorter than this (task-switcher hops) skip the cycle. */
+        const val BACKGROUND_CYCLE_MS = 3_000L
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }
