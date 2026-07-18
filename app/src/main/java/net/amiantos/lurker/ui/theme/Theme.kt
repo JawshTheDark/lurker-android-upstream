@@ -78,13 +78,14 @@ private val DarkPalette = Palette(
     dark = true,
 )
 
-// Light: iOS-light flavored, frosted white glass on a grey canvas.
+// Light: iOS-light flavored. Near-white canvas with clearly-grey received
+// bubbles (iMessage-style) so peers don't wash into the background.
 private val LightPalette = Palette(
-    canvas = Color(0xFFF2F2F7),
-    surface = Color(0xC7FFFFFF),
-    raised = Color(0xFFE5E5EC),
-    pill = Color(0xFFCFCFD8),
-    border = Color(0x14000000),
+    canvas = Color(0xFFF7F7FB),
+    surface = Color(0xF2FFFFFF), // cards/composer: crisp near-opaque white
+    raised = Color(0xFFE4E4EC), // received bubbles + pills — reads as a distinct grey
+    pill = Color(0xFFD5D5DE),
+    border = Color(0x1A000000),
     accent = Color(0xFF007AFF),
     red = Color(0xFFFF3B30),
     textPrimary = Color(0xFF1C1C1E),

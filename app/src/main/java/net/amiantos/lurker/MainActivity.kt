@@ -757,11 +757,21 @@ private fun ChatScreen(
         messages.count { it.id > since && !it.system && !it.self }
     } ?: 0
 
+    // Opening a buffer lands at the newest message ONCE (regardless of scroll
+    // position), the moment its rows populate. After that, live messages only
+    // follow the tail if you're already at the bottom — so you never fight it.
+    var openScrollDone by remember(buffer.key) { mutableStateOf(false) }
+    LaunchedEffect(buffer.key, rows.isNotEmpty()) {
+        if (!openScrollDone && rows.isNotEmpty()) {
+            listState.scrollToItem(rows.lastIndex + headerCount)
+            openScrollDone = true
+        }
+    }
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
-        if (rows.isNotEmpty() && anchorId == null && atBottom) {
+        if (openScrollDone && anchorId == null && atBottom) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
     }

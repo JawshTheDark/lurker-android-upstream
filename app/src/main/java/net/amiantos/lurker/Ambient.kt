@@ -39,10 +39,11 @@ fun AmbientBackground(modifier: Modifier = Modifier) {
     val alpha = when (theme) {
         AppTheme.Oled -> 0.05f
         AppTheme.Dark -> 0.16f
-        AppTheme.Light -> 0.10f
+        AppTheme.Light -> 0.05f // subtle on white — the green/warm wash read "wonky"
     }
     val blobs = when (theme) {
-        AppTheme.Light -> listOf(AccentBlue, Color(0xFFFF9F0A), Color(0xFF30D158))
+        // Light: cool tones only (blue/lavender/sky) so white stays clean, not greenish.
+        AppTheme.Light -> listOf(AccentBlue, Color(0xFFBF5AF2), Color(0xFF64D2FF))
         else -> listOf(AccentBlue, Color(0xFFBF5AF2), Color(0xFF32ADE6))
     }
 
