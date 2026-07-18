@@ -741,11 +741,17 @@ private fun ChatScreen(
     }
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
+    var missed by remember(buffer.key) { mutableStateOf(0) }
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
         if (rows.isNotEmpty() && anchorId == null && atBottom) {
             listState.scrollToItem(rows.lastIndex + headerCount)
+        } else if (!atBottom && messages.lastOrNull()?.system == false) {
+            missed++ // arrived while reading history — counted on the jump chip
         }
+    }
+    LaunchedEffect(atBottom) {
+        if (atBottom) missed = 0
     }
     // Older page landed: put the previously-oldest row back under the finger.
     LaunchedEffect(oldestId) {
@@ -940,8 +946,8 @@ private fun ChatScreen(
         if (!atBottom && rows.isNotEmpty()) {
             val scope = rememberCoroutineScope()
             Text(
-                "↓ Latest",
-                color = TextPrimary,
+                if (missed > 0) "↓ $missed new" else "↓ Latest",
+                color = if (missed > 0) AccentBlue else TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
