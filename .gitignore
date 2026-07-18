@@ -44,3 +44,7 @@ keystore/
 keystore.properties
 *.jks
 *.keystore
+
+# Play listing assets (local only)
+play_assets/
+PLAY_LISTING.md
