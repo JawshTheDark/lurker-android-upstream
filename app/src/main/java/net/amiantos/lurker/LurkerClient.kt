@@ -72,6 +72,17 @@ class LurkerClient {
     /** Server-synced custom aliases (name -> expansion). Fork-only feature. */
     val aliases = mutableStateListOf<AliasEntry>()
 
+    /** networkId -> pinned buffer targets, in user order. */
+    val pins = mutableStateMapOf<Int, List<String>>()
+
+    // Channel-list browser (/LIST) state for the currently-viewed network.
+    val chanlistRows = mutableStateListOf<ChannelListing>()
+    var chanlistLoading by mutableStateOf(false)
+    var chanlistInProgress by mutableStateOf(false)
+    var chanlistTotalCount by mutableStateOf(0)
+    private var chanlistKey = "" // (query,sortBy,sortDir) guard
+    private var chanlistNetworkId = -1
+
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
 
@@ -242,6 +253,8 @@ class LurkerClient {
             drafts.clear()
             inputHistory.clear()
             aliases.clear()
+            pins.clear()
+            chanlistRows.clear()
             searchResults.clear()
             highlightItems.clear()
             settingsRegistry.clear()
@@ -595,6 +608,32 @@ class LurkerClient {
             }
             "alias-list-updated" -> applyAliases(frame.optJSONArray("aliases"))
 
+            "pins-changed" -> {
+                val networkId = frame.optInt("networkId", -1)
+                if (networkId >= 0) {
+                    val p = frame.optJSONArray("pinned")
+                    pins[networkId] = if (p == null) emptyList() else (0 until p.length()).map { p.optString(it) }
+                }
+            }
+
+            "chanlist-result" -> {
+                val networkId = frame.optInt("networkId", -1)
+                val key = "${frame.optString("query")}|${frame.optString("sortBy")}|${frame.optString("sortDir")}"
+                if (networkId != chanlistNetworkId || key != chanlistKey) return // superseded
+                chanlistLoading = false
+                chanlistInProgress = frame.optBoolean("inProgress", false)
+                chanlistTotalCount = frame.optInt("totalCount", 0)
+                val rows = frame.optJSONArray("rows")
+                val parsed = ArrayList<ChannelListing>()
+                if (rows != null) for (i in 0 until rows.length()) {
+                    val r = rows.optJSONObject(i) ?: continue
+                    parsed.add(ChannelListing(r.optString("channel"), r.optInt("num_users"), r.optString("topic")))
+                }
+                if (frame.optInt("offset", 0) == 0) chanlistRows.clear()
+                val known = chanlistRows.mapTo(HashSet()) { it.channel }
+                chanlistRows.addAll(parsed.filter { it.channel !in known })
+            }
+
             "dcc-transfer" -> frame.optJSONObject("transfer")?.let { applyTransfer(it) }
 
             "send-result" -> {
@@ -675,6 +714,10 @@ class LurkerClient {
                 nick = n.optString("nick").ifEmpty { null },
                 connected = n.optBoolean("connected", n.optString("state") == "connected"),
             )
+            // Per-network pinned buffers, in the user's chosen order.
+            n.optJSONArray("pinned")?.let { p ->
+                pins[id] = (0 until p.length()).map { p.optString(it) }
+            }
             // The snapshot carries each channel's member roster inline.
             n.optJSONArray("channels")?.let { chans ->
                 for (c in 0 until chans.length()) {
@@ -1494,6 +1537,41 @@ class LurkerClient {
                 post { highlightsLoading = false }
             }
         }
+    }
+
+    // ---- Pins, mark-all-read, channel list ---------------------------------
+
+    fun isPinned(buffer: Buffer): Boolean =
+        buffer.networkId?.let { pins[it]?.any { t -> t.equals(buffer.target, true) } } == true
+
+    fun togglePin(buffer: Buffer) {
+        val networkId = buffer.networkId ?: return
+        val type = if (isPinned(buffer)) "unpin-buffer" else "pin-buffer"
+        ws?.send(JSONObject().put("type", type).put("networkId", networkId).put("target", buffer.target).toString())
+    }
+
+    fun markAllRead() {
+        ws?.send(JSONObject().put("type", "mark-all-read").toString())
+    }
+
+    /** Kick a fresh /LIST refresh on a network and load its cached rows. */
+    fun openChannelList(networkId: Int) {
+        chanlistNetworkId = networkId
+        chanlistRows.clear()
+        ws?.send(JSONObject().put("type", "list-channels").put("networkId", networkId).toString())
+        searchChannelList("", "users", "desc", 0)
+    }
+
+    fun searchChannelList(query: String, sortBy: String, sortDir: String, offset: Int) {
+        val networkId = chanlistNetworkId
+        if (networkId < 0) return
+        chanlistKey = "$query|$sortBy|$sortDir"
+        if (offset == 0) chanlistLoading = true
+        ws?.send(
+            JSONObject().put("type", "chanlist-search").put("networkId", networkId)
+                .put("query", query).put("sortBy", sortBy).put("sortDir", sortDir)
+                .put("offset", offset).put("limit", 200).toString(),
+        )
     }
 
     private fun applyTransfer(o: JSONObject) {

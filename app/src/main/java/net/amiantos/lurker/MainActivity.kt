@@ -173,6 +173,7 @@ private sealed interface Screen {
     data object Dcc : Screen
     data object Networks : Screen
     data object Search : Screen
+    data object ChannelList : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
 
@@ -212,6 +213,7 @@ class MainActivity : ComponentActivity() {
                         onDcc = { client.loadDcc(); screen = Screen.Dcc },
                         onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
                         onSearch = { screen = Screen.Search },
+                        onBrowse = { screen = Screen.ChannelList },
                         onSignOut = { client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
@@ -244,6 +246,16 @@ class MainActivity : ComponentActivity() {
                         client = client,
                         onOpenResult = { networkId, target ->
                             val buffer = client.focusTarget(networkId, target)
+                            client.setActive(buffer)
+                            screen = Screen.Chat(buffer)
+                        },
+                        onBack = { screen = Screen.Buffers },
+                    )
+                    Screen.ChannelList -> ChannelListScreen(
+                        client = client,
+                        onJoin = { networkId, chan ->
+                            client.execute(client.focusTarget(networkId, chan), listOf(WireOp("join", channel = chan)))
+                            val buffer = client.focusTarget(networkId, chan)
                             client.setActive(buffer)
                             screen = Screen.Chat(buffer)
                         },
@@ -352,6 +364,7 @@ private fun BufferListScreen(
     onDcc: () -> Unit,
     onNetworks: () -> Unit,
     onSearch: () -> Unit,
+    onBrowse: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -367,6 +380,7 @@ private fun BufferListScreen(
             client.unread.toMap(),
             client.networks.toMap(),
             client.networkConfigs.toList(),
+            client.pins.toMap(),
         ) { buildBufferSections(client) }
 
         if (rows.isEmpty()) {
@@ -413,6 +427,8 @@ private fun BufferListScreen(
                         Text("⋯", color = TextSecondary, fontSize = 22.sp)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Browse channels (/LIST)") }, onClick = { menuOpen = false; onBrowse() })
+                        DropdownMenuItem(text = { Text("Mark all read") }, onClick = { menuOpen = false; client.markAllRead() })
                         DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
                         DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
@@ -478,6 +494,10 @@ private fun BufferListBody(
                                 unread = client.unread[buffer.key] ?: 0,
                                 highlight = (client.highlights[buffer.key] ?: 0) > 0,
                                 hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
+                                pinned = client.isPinned(buffer),
+                                onTogglePin = if (buffer.isSystem || buffer.isServerBuffer) null else {
+                                    { client.togglePin(buffer) }
+                                },
                                 onClick = { onOpen(buffer) },
                                 onClose = if (buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.execute(buffer, listOf(WireOp("close"))) }
@@ -505,20 +525,28 @@ private data class BufferSection(val network: String, val buffers: List<Buffer>)
  * within a section the Server row leads, then unread, channels, DMs.
  */
 private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
+    val out = mutableListOf<BufferSection>()
+    // A "Pinned" section leads, intersecting pins with actually-open buffers.
+    val pinned = client.buffers.filter { client.isPinned(it) }
+    if (pinned.isNotEmpty()) out.add(BufferSection("★ Pinned", pinned.sortedBy { it.target.lowercase() }))
+
     val byNetwork = client.buffers.groupBy { it.networkName }
-    return byNetwork.keys
+    byNetwork.keys
         .sortedWith(compareBy({ client.networkOrder(it) }, { it.lowercase() }))
-        .map { network ->
-            BufferSection(
-                network = network,
-                buffers = byNetwork.getValue(network).sortedWith(
-                    compareByDescending<Buffer> { it.isServerBuffer } // Server row leads
-                        .thenByDescending { (client.unread[it.key] ?: 0) > 0 }
-                        .thenByDescending { it.isChannel }
-                        .thenBy { it.target.lowercase() },
+        .forEach { network ->
+            out.add(
+                BufferSection(
+                    network = network,
+                    buffers = byNetwork.getValue(network).sortedWith(
+                        compareByDescending<Buffer> { it.isServerBuffer } // Server row leads
+                            .thenByDescending { (client.unread[it.key] ?: 0) > 0 }
+                            .thenByDescending { it.isChannel }
+                            .thenBy { it.target.lowercase() },
+                    ),
                 ),
             )
         }
+    return out
 }
 
 @Composable
@@ -527,21 +555,31 @@ private fun BufferRow(
     unread: Int,
     highlight: Boolean,
     hasDraft: Boolean = false,
+    pinned: Boolean = false,
+    onTogglePin: (() -> Unit)? = null,
     onClick: () -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
     var menu by remember { mutableStateOf(false) }
-    if (onClose != null) {
+    if (onClose != null || onTogglePin != null) {
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        if (buffer.isChannel) "Close (leaves ${buffer.target})" else "Close conversation",
-                        color = AlertRed,
-                    )
-                },
-                onClick = { menu = false; onClose() },
-            )
+            if (onTogglePin != null) {
+                DropdownMenuItem(
+                    text = { Text(if (pinned) "Unpin" else "Pin to top") },
+                    onClick = { menu = false; onTogglePin() },
+                )
+            }
+            if (onClose != null) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (buffer.isChannel) "Close (leaves ${buffer.target})" else "Close conversation",
+                            color = AlertRed,
+                        )
+                    },
+                    onClick = { menu = false; onClose() },
+                )
+            }
         }
     }
     Row(
@@ -2781,6 +2819,109 @@ private fun ResultRow(client: LurkerClient, r: SearchResult, onOpen: (Int, Strin
         Text(mircAnnotated(r.body, AccentBlue), fontSize = 15.sp, color = TextPrimary, modifier = Modifier.padding(top = 2.dp))
     }
     HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 16.dp))
+}
+
+// ---- Channel list (/LIST) --------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelListScreen(
+    client: LurkerClient,
+    onJoin: (Int, String) -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    val connected = remember(client.networks.toMap()) { client.networks.values.filter { it.connected } }
+    var networkId by remember(connected.map { it.id }) { mutableStateOf(connected.firstOrNull()?.id) }
+    var query by remember { mutableStateOf("") }
+    var sortByUsers by remember { mutableStateOf(true) }
+    var netMenu by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(networkId) { networkId?.let { client.openChannelList(it) } }
+    LaunchedEffect(query, sortByUsers) {
+        kotlinx.coroutines.delay(300)
+        if (networkId != null) client.searchChannelList(query, if (sortByUsers) "users" else "name", "desc", 0)
+    }
+
+    confirm?.let { chan ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            containerColor = SurfaceRaised,
+            title = { Text("Join $chan?", color = TextPrimary) },
+            confirmButton = {
+                TextButton(onClick = { confirm = null; networkId?.let { onJoin(it, chan) } }) {
+                    Text("Join", color = AccentBlue, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel", color = TextSecondary) } },
+        )
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = { TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) } },
+                title = { Text("Channels", fontWeight = FontWeight.SemiBold) },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(16.dp, 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    TextButton(onClick = { netMenu = true }) {
+                        Text(connected.firstOrNull { it.id == networkId }?.name ?: "Network", color = AccentBlue)
+                    }
+                    DropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
+                        connected.forEach { n -> DropdownMenuItem(text = { Text(n.name) }, onClick = { networkId = n.id; netMenu = false }) }
+                    }
+                }
+                SearchTab(if (sortByUsers) "By users" else "By name", true) { sortByUsers = !sortByUsers }
+                if (client.chanlistInProgress) Text("refreshing… ${client.chanlistTotalCount}", color = TextSecondary, fontSize = 12.sp)
+            }
+            TextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text("Filter channels", color = TextSecondary) },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = SurfaceDark, unfocusedContainerColor = SurfaceDark,
+                    focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, cursorColor = AccentBlue,
+                ),
+                modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp),
+            )
+            val rows = client.chanlistRows
+            if (client.chanlistLoading && rows.isEmpty()) {
+                Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+            }
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(rows.size) { i ->
+                    val r = rows[i]
+                    Column(
+                        Modifier.fillMaxWidth().clickable { confirm = r.channel }.padding(16.dp, 8.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(r.channel, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                            Text("${r.users}", color = TextSecondary, fontSize = 13.sp)
+                        }
+                        if (r.topic.isNotBlank()) {
+                            Text(mircAnnotated(r.topic, AccentBlue), color = TextSecondary, fontSize = 12.sp, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
+                        }
+                    }
+                    HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 16.dp))
+                    if (i == rows.size - 1 && rows.size < client.chanlistTotalCount) {
+                        LaunchedEffect(rows.size) {
+                            client.searchChannelList(query, if (sortByUsers) "users" else "name", "desc", rows.size)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---- DCC -----------------------------------------------------------------

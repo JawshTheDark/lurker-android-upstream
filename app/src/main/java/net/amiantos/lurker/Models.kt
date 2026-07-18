@@ -69,6 +69,9 @@ data class DccTransfer(
 /** A server-synced custom slash alias: /name expands to expansion with $1..$9 params. */
 data class AliasEntry(val id: Int, val name: String, val expansion: String)
 
+/** A row in the /LIST channel browser. */
+data class ChannelListing(val channel: String, val users: Int, val topic: String)
+
 /** One search / highlights result row (decorated DB message: body + createdAt). */
 data class SearchResult(
     val id: Long,
