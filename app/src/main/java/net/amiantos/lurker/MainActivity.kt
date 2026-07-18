@@ -739,19 +739,24 @@ private fun ChatScreen(
             lastVisible >= info.totalItemsCount - 2
         }
     }
+    // The jump chip's count is DERIVED, not incremented: snapshot the newest id
+    // when the reader leaves the bottom, then count real messages beyond it —
+    // exact even when a burst lands in one recomposition.
+    var awaySinceId by remember(buffer.key) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(atBottom) {
+        awaySinceId = if (atBottom) null else (messages.lastOrNull { it.id > 0 }?.id ?: 0L)
+    }
+    val missed = awaySinceId?.let { since ->
+        messages.count { it.id > since && !it.system && !it.self }
+    } ?: 0
+
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
-    var missed by remember(buffer.key) { mutableStateOf(0) }
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
         if (rows.isNotEmpty() && anchorId == null && atBottom) {
             listState.scrollToItem(rows.lastIndex + headerCount)
-        } else if (!atBottom && messages.lastOrNull()?.system == false) {
-            missed++ // arrived while reading history — counted on the jump chip
         }
-    }
-    LaunchedEffect(atBottom) {
-        if (atBottom) missed = 0
     }
     // Older page landed: put the previously-oldest row back under the finger.
     LaunchedEffect(oldestId) {
