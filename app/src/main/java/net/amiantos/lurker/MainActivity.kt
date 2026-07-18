@@ -138,6 +138,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.ImageDecoderDecoder
@@ -681,27 +686,14 @@ private fun ChatScreen(
     // player picker, everything else to the browser.
     val openLink: (String) -> Unit = { url ->
         val clean = url.substringBefore('?').substringBefore('#').lowercase()
-        when {
-            IMAGE_EXTS.any { clean.endsWith(it) } -> viewerUrl = url
-            MEDIA_EXTS.any { clean.endsWith(it) } -> {
-                try {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(
-                                Uri.parse(url),
-                                if (AUDIO_EXTS.any { clean.endsWith(it) }) "audio/*" else "video/*",
-                            )
-                        },
-                    )
-                } catch (_: Exception) {
-                    uriHandler.openUri(url)
-                }
-            }
-            else -> uriHandler.openUri(url)
+        if ((IMAGE_EXTS + MEDIA_EXTS).any { clean.endsWith(it) }) {
+            viewerUrl = url
+        } else {
+            uriHandler.openUri(url)
         }
     }
 
-    viewerUrl?.let { url -> ImageViewerDialog(url, onClose = { viewerUrl = null }) }
+    viewerUrl?.let { url -> MediaViewerDialog(url, onClose = { viewerUrl = null }) }
 
     // Reveal the ghost bubble only when already reading the tail.
     LaunchedEffect(typers.isNotEmpty()) {
@@ -1254,49 +1246,76 @@ private val AUDIO_EXTS = listOf(".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a"
 private val MEDIA_EXTS = VIDEO_EXTS + AUDIO_EXTS
 
 /**
- * Full-screen in-app image viewer: pinch to zoom, drag to pan, GIFs animate.
- * Escape hatches: open in browser, or ✕ / back to close.
+ * Full-screen in-app media viewer. Images: pinch-zoom + pan, GIFs animate.
+ * Video/audio: embedded ExoPlayer with the standard controls. Escape hatches:
+ * open in browser, or ✕ / back to close.
  */
 @Composable
-private fun ImageViewerDialog(url: String, onClose: () -> Unit) {
+private fun MediaViewerDialog(url: String, onClose: () -> Unit) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    val loader = remember {
-        ImageLoader.Builder(context)
-            .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP
-            .build()
-    }
+    val clean = url.substringBefore('?').substringBefore('#').lowercase()
+    val isImage = IMAGE_EXTS.any { clean.endsWith(it) }
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        var scale by remember { mutableStateOf(1f) }
-        var offset by remember { mutableStateOf(Offset.Zero) }
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.96f))
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 6f)
-                        offset = if (scale > 1f) offset + pan else Offset.Zero
-                    }
-                },
+                .background(Color.Black.copy(alpha = 0.96f)),
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
-                imageLoader = loader,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = offset.x
-                        translationY = offset.y
+            if (isImage) {
+                val loader = remember {
+                    ImageLoader.Builder(context)
+                        .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP
+                        .build()
+                }
+                var scale by remember { mutableStateOf(1f) }
+                var offset by remember { mutableStateOf(Offset.Zero) }
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
+                    imageLoader = loader,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(1f, 6f)
+                                offset = if (scale > 1f) offset + pan else Offset.Zero
+                            }
+                        }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        },
+                )
+            } else {
+                // Video and audio share ExoPlayer; audio just shows the controls.
+                val player = remember {
+                    ExoPlayer.Builder(context).build().apply {
+                        setMediaItem(MediaItem.fromUri(url))
+                        prepare()
+                        playWhenReady = true
+                    }
+                }
+                DisposableEffect(Unit) {
+                    onDispose { player.release() }
+                }
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            this.player = player
+                            setShowNextButton(false)
+                            setShowPreviousButton(false)
+                        }
                     },
-            )
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             Row(
                 Modifier
                     .align(Alignment.TopEnd)
