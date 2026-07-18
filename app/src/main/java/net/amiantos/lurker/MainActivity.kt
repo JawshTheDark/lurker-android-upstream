@@ -132,6 +132,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -184,6 +185,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val prefs = Prefs(this)
         Ui.theme = AppTheme.from(prefs.theme)
+        Ui.inlineMedia = prefs.inlineMedia
         client.start(prefs)
         consumeShareIntent(intent)
         setContent {
@@ -628,7 +630,10 @@ private fun ChatScreen(
     BackHandler(onBack = onBack)
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var showMembers by remember { mutableStateOf(false) }
+    var showE2e by remember { mutableStateOf(false) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
+    // No "channel is encrypted" frame exists; infer from recent E2E traffic.
+    val e2eActive = remember(messages.size) { messages.takeLast(200).any { it.e2e } }
     val divider = client.dividerAfter[buffer.key]
     val rows = remember(messages, divider) { buildChatRows(messages, divider) }
     val listState = rememberLazyListState()
@@ -866,11 +871,19 @@ private fun ChatScreen(
                         ) {
                             ConnectionDot(client.connected)
                             Spacer(Modifier.width(7.dp))
+                            if (e2eActive) {
+                                Text("🔒", fontSize = 12.sp)
+                                Spacer(Modifier.width(4.dp))
+                            }
                             Text(buffer.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.width(5.dp))
                             Text("⌄", color = TextSecondary, fontSize = 13.sp)
                         }
                         DropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Encryption (E2E)", color = OnlineGreen) },
+                                onClick = { titleMenu = false; showE2e = true; client.execute(buffer, listOf(WireOp("e2e", target = buffer.target, line = "status"))) },
+                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(
@@ -985,6 +998,87 @@ private fun ChatScreen(
                 filePicker.launch("*/*")
             },
         )
+    }
+
+    if (showE2e) {
+        E2eSheet(
+            client = client,
+            buffer = buffer,
+            messages = messages,
+            onDismiss = { showE2e = false },
+        )
+    }
+}
+
+/**
+ * Encryption panel: the E2E scrollback (status/handshake lines) for this buffer
+ * plus quick-action buttons that drive the server's /e2e subcommands. All crypto
+ * is server-side; this is a control + status surface only.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun E2eSheet(
+    client: LurkerClient,
+    buffer: Buffer,
+    messages: List<Msg>,
+    onDismiss: () -> Unit,
+) {
+    val lines = remember(messages.size) { messages.filter { it.type == "e2e" }.takeLast(60) }
+    fun run(args: String) = client.execute(buffer, listOf(WireOp("e2e", target = buffer.target, line = args)))
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetGesturesEnabled = false,
+        containerColor = SurfaceDark,
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+            Text(
+                "🔒 Encryption — ${buffer.displayName}",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+            Text(
+                "End-to-end encryption is handled by your Lurker server. These are the handshake and status lines for this buffer.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = { run("status") }) { Text("Status", fontSize = 13.sp) }
+                TextButton(onClick = { run("list") }) { Text("Peers", fontSize = 13.sp) }
+                TextButton(onClick = { run("fingerprint") }) { Text("My key", fontSize = 13.sp) }
+                TextButton(onClick = { run("help") }) { Text("Help", fontSize = 13.sp) }
+            }
+            Text(
+                "Type /e2e handshake <nick>, /e2e accept <nick>, /e2e verify <nick>, /e2e on in chat.",
+                color = TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 2.dp, bottom = 10.dp),
+            )
+            HorizontalDivider(color = SurfaceRaised)
+            if (lines.isEmpty()) {
+                Text(
+                    "No E2E activity yet. Tap Status, or start a handshake from chat.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 20.dp),
+                )
+            } else {
+                LazyColumn(Modifier.heightIn(max = 380.dp).padding(top = 8.dp)) {
+                    items(lines.size) { i ->
+                        val m = lines[i]
+                        Text(
+                            m.text,
+                            color = if (m.level == "warn") AlertRed else TextPrimary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1254,10 +1348,18 @@ private fun MessageBubble(
                 fontSize = baseSize.sp,
             )
         }
+        // Inline media thumbnails (device-local toggle). Tap → the full viewer via
+        // the same onLink route that already handles media URLs.
+        if (Ui.inlineMedia && onLink != null) {
+            val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
+            embeds.forEach { (url, kind) -> MediaEmbed(url, kind, onOpen = { onLink(url) }) }
+        }
         if (last) {
             Text(
-                formatTime(msg.time) ?: "",
-                color = TextSecondary,
+                // 🔒 marks an end-to-end-encrypted message (the web client
+                // carries the flag but never shows it — we do).
+                (if (msg.e2e) "🔒 " else "") + (formatTime(msg.time) ?: ""),
+                color = if (msg.e2e) OnlineGreen else TextSecondary,
                 fontSize = (baseSize - 5).sp,
                 modifier = Modifier.padding(
                     start = if (self) 0.dp else 14.dp,
@@ -1289,10 +1391,64 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)?
 
 private val CHANNEL_RE = Regex("""#[^\s,]+""")
 
-private val IMAGE_EXTS = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif")
-private val VIDEO_EXTS = listOf(".mp4", ".webm", ".mkv", ".mov", ".m4v")
-private val AUDIO_EXTS = listOf(".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a")
+// IMAGE_EXTS/VIDEO_EXTS/AUDIO_EXTS live in Media.kt now (shared with embeds).
 private val MEDIA_EXTS = VIDEO_EXTS + AUDIO_EXTS
+
+/** One shared animated image loader for all inline embeds (GIF/WebP capable). */
+private var embedLoader: coil.ImageLoader? = null
+
+@Composable
+private fun rememberEmbedLoader(): coil.ImageLoader {
+    val context = LocalContext.current
+    return remember {
+        embedLoader ?: coil.ImageLoader.Builder(context)
+            .components { add(coil.decode.ImageDecoderDecoder.Factory()) }
+            .crossfade(true)
+            .build()
+            .also { embedLoader = it }
+    }
+}
+
+/**
+ * A fixed-height inline media card in a chat bubble. Fixed height is deliberate:
+ * the chat list's tail-follow + load-older anchoring assume row heights don't
+ * change after composition, so an image must not resize the row on load. Images
+ * crop to fill; video/audio show a static play card (no remote frame fetch).
+ */
+@Composable
+private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit) {
+    Box(
+        Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth()
+            .height(200.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(CanvasBlack)
+            .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
+            .clickable(onClick = onOpen),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (kind == MediaKind.IMAGE) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(url).build(),
+                imageLoader = rememberEmbedLoader(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if (kind == MediaKind.VIDEO) "▶" else "♪", color = Color.White, fontSize = 34.sp)
+                Text(
+                    url.substringAfterLast('/').substringBefore('?').take(40),
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 6.dp, start = 12.dp, end = 12.dp),
+                )
+            }
+        }
+    }
+}
 
 /**
  * Full-screen in-app media viewer. Images: pinch-zoom + pan, GIFs animate.
@@ -1425,6 +1581,31 @@ private fun TypingBubble(nicks: List<String>) {
 
 @Composable
 private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
+    if (msg.type == "e2e") {
+        // Encryption status / handshake line: an "E2E" tag, green for info,
+        // red for warn — mirrors the web client's .p-e2e styling.
+        val warn = msg.level == "warn"
+        val line = buildAnnotatedString {
+            withStyle(
+                SpanStyle(
+                    color = if (warn) AlertRed else OnlineGreen,
+                    fontWeight = FontWeight.Bold,
+                ),
+            ) { append("🔒 E2E  ") }
+            append(msg.text)
+        }
+        Text(
+            line,
+            fontSize = 12.sp,
+            color = if (warn) AlertRed else TextSecondary,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp, 4.dp)
+                .background(SurfaceDark, RoundedCornerShape(8.dp))
+                .padding(12.dp, 7.dp),
+        )
+        return
+    }
     if (msg.type == "system") {
         // :system: log lines read like a terminal: left-aligned, level-tinted.
         Text(
@@ -1798,6 +1979,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 }
                 item { Spacer(Modifier.height(8.dp)) }
                 item { ThemePickerCard(prefs) }
+                item { InlineMediaCard(prefs) }
                 items(orderedCategories.size) { i ->
                     val cat = orderedCategories[i]
                     val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
@@ -1875,6 +2057,35 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
 }
 
 /** Local (device-only) look selector — not a server registry setting. */
+@Composable
+private fun InlineMediaCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Inline media", fontSize = 17.sp)
+                Text(
+                    "Show image & video links as thumbnails. Off = tap-to-open only (won't fetch link previews).",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = Ui.inlineMedia,
+                onCheckedChange = { Ui.inlineMedia = it; prefs.inlineMedia = it },
+            )
+        }
+    }
+}
+
 @Composable
 private fun ThemePickerCard(prefs: Prefs) {
     Surface(

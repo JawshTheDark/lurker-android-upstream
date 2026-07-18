@@ -200,6 +200,9 @@ object Mirc {
     private val URL_REGEX =
         Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE)
 
+    /** The URL strings within [text] (single regex source, shared with rendering). */
+    fun urls(text: String): List<String> = findUrls(text).map { text.substring(it) }
+
     /** Character ranges of URLs within [text], trailing sentence punctuation trimmed. */
     fun findUrls(text: String): List<IntRange> =
         URL_REGEX.findAll(text).map { m ->

@@ -24,9 +24,10 @@ enum class AppTheme(val id: String, val label: String) {
     }
 }
 
-/** Global theme selector; the Activity seeds it from Prefs at launch. */
+/** Global device-local UI prefs; the Activity seeds them from Prefs at launch. */
 object Ui {
     var theme by mutableStateOf(AppTheme.Oled)
+    var inlineMedia by mutableStateOf(true)
 }
 
 private data class Palette(

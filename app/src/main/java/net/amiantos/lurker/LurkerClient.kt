@@ -906,6 +906,16 @@ class LurkerClient {
             "message", "action", "notice", "error" -> Msg(
                 id = id, type = type, nick = nick, text = text,
                 self = e.optBoolean("self", false), time = e.optString("time").ifEmpty { null },
+                // Persisted flag: the message rode E2E (server already decrypted it).
+                e2e = e.optBoolean("e2e", false),
+            )
+            // Ephemeral E2E status/handshake line: rendered as a tagged system
+            // line (green info / red warn), never persisted. No crypto involved.
+            "e2e" -> Msg(
+                id = id, type = "e2e", nick = "", text = text,
+                self = false, time = e.optString("time").ifEmpty { null },
+                system = true,
+                level = e.optString("level").ifEmpty { "info" },
             )
             // The :system: buffer's log lines (#355): type 'system', nick null,
             // with level/scope/source riding alongside.
@@ -1011,6 +1021,8 @@ class LurkerClient {
                     main.postDelayed({ failSend(clientId, "no acknowledgement (timeout)") }, SEND_ACK_TIMEOUT)
                 }
                 "raw" -> frame.put("type", "raw").put("line", op.line)
+                // {type:'e2e', networkId, target, args} — server runs the subcommand.
+                "e2e" -> frame.put("type", "e2e").put("target", target).put("args", op.line.orEmpty())
                 "join" -> frame.put("type", "join").put("channel", op.channel)
                 "part" -> {
                     frame.put("type", "part").put("channel", op.channel)

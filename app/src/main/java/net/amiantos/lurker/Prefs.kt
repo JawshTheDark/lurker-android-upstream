@@ -38,6 +38,11 @@ class Prefs(context: Context) {
         get() = sp.getString("theme", null)
         set(value) = sp.edit { putString("theme", value) }
 
+    /** Auto-embed image/video links as inline thumbnails in chat (default on). */
+    var inlineMedia: Boolean
+        get() = sp.getBoolean("inlineMedia", true)
+        set(value) = sp.edit { putBoolean("inlineMedia", value) }
+
     /** Persist a fresh session after a successful token mint. */
     fun saveSession(server: String, username: String, token: String) {
         sp.edit {

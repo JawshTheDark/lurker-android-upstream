@@ -36,8 +36,10 @@ data class Msg(
     val self: Boolean,
     val time: String? = null,
     val system: Boolean = false,
-    /** Log severity for :system: lines (info/warn/error), null elsewhere. */
+    /** Log severity for :system: and E2E lines (info/warn/error), null elsewhere. */
     val level: String? = null,
+    /** True when this message arrived end-to-end encrypted (server-decrypted). */
+    val e2e: Boolean = false,
 )
 
 /** An inbound DCC file transfer, mirrored from the server's transfer rows. */

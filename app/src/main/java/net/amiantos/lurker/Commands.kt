@@ -182,6 +182,11 @@ object Commands {
                 )
             }
 
+            // End-to-end encryption control (RPE2E). The server runs the whole
+            // /e2e subcommand surface; we just pass the argument line through as
+            // a dedicated {type:'e2e'} frame, scoped to this buffer.
+            "e2e" -> ParsedInput.Ops(listOf(WireOp("e2e", target = currentTarget, line = rest)))
+
             else -> err("Unknown command: /$verb  (try /help, or /raw to send it literally)")
         }
     }
