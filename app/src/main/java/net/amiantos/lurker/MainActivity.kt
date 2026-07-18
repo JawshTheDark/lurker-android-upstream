@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -794,6 +796,9 @@ private fun ChatScreen(
     // the prepend lands, so the viewport doesn't jump.
     var anchorId by remember(buffer.key) { mutableStateOf<Long?>(null) }
     val headerCount = if (showLoadOlder) 1 else 0
+    // Bumped whenever an inline image finishes loading and resizes its card, so
+    // the tail-follow effect below can re-pin the bottom instead of drifting up.
+    var mediaTick by remember(buffer.key) { mutableStateOf(0) }
 
     // Reading position is sacred: follow the tail ONLY when the user is already
     // at (or within a couple rows of) the bottom. The -2 slack also absorbs the
@@ -834,6 +839,13 @@ private fun ChatScreen(
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
         if (openScrollDone && anchorId == null && atBottom) {
+            listState.scrollToItem(rows.lastIndex + headerCount)
+        }
+    }
+    // An image resizing its card mustn't shove the tail out from under a reader
+    // who's sitting at the bottom — re-pin when one loads.
+    LaunchedEffect(mediaTick) {
+        if (mediaTick > 0 && openScrollDone && anchorId == null && atBottom) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
     }
@@ -901,7 +913,10 @@ private fun ChatScreen(
             }
             items(rows.size) { i ->
                 when (val row = rows[i]) {
-                    is ChatRow.Bubble -> MessageBubble(row.msg, row.first, row.last, baseSize, openLink)
+                    is ChatRow.Bubble -> MessageBubble(
+                        row.msg, row.first, row.last, baseSize, openLink,
+                        onMediaLoaded = { mediaTick++ },
+                    )
                     is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
                         row.msg,
@@ -1417,6 +1432,7 @@ private fun MessageBubble(
     last: Boolean,
     baseSize: Int,
     onLink: ((String) -> Unit)? = null,
+    onMediaLoaded: () -> Unit = {},
 ) {
     val self = msg.self
     // Grouping reads through the corners: the shared edge between messages of
@@ -1478,7 +1494,7 @@ private fun MessageBubble(
                 if (kind == MediaKind.AUDIO) {
                     InlineAudioPlayer(url)
                 } else {
-                    MediaEmbed(url, kind, onOpen = { onLink(url) })
+                    MediaEmbed(url, kind, onOpen = { onLink(url) }, onLoaded = onMediaLoaded)
                 }
             }
         }
@@ -1538,35 +1554,63 @@ private fun rememberEmbedLoader(): coil.ImageLoader {
 }
 
 /**
- * A fixed-height inline media card in a chat bubble. Fixed height is deliberate:
- * the chat list's tail-follow + load-older anchoring assume row heights don't
- * change after composition, so an image must not resize the row on load. Images
- * crop to fill; video/audio show a static play card (no remote frame fetch).
+ * An inline media card in a chat bubble. Images take the picture's own aspect
+ * ratio (scaled to fit, never cropped), bounded so a tall portrait can't run
+ * away; video shows a 16:9 play card (no remote frame fetch). The card resizes
+ * when the image loads, so [onLoaded] lets the chat re-pin to the tail — that
+ * keeps the tail-follow / load-older anchoring stable despite the size change.
  */
 @Composable
-private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit) {
-    Box(
-        Modifier
-            .padding(top = 6.dp)
-            .fillMaxWidth()
-            .height(200.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(CanvasBlack)
-            .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
-            .clickable(onClick = onOpen),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (kind == MediaKind.IMAGE) {
-            AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current).data(url).build(),
-                imageLoader = rememberEmbedLoader(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
+private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit, onLoaded: () -> Unit = {}) {
+    if (kind == MediaKind.IMAGE) {
+        // Real aspect once known; a landscape default reserves sane space first.
+        var ratio by remember(url) { mutableStateOf<Float?>(null) }
+        BoxWithConstraints(Modifier.padding(top = 6.dp).fillMaxWidth()) {
+            // Card takes the picture's own shape (width / aspect), bounded so a
+            // tall portrait can't run off-screen. Within the bound the whole
+            // image shows; only extreme aspects letterbox.
+            val h = (maxWidth / (ratio ?: 1.6f)).coerceIn(80.dp, 360.dp)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(h)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CanvasBlack)
+                    .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpen),
+                contentAlignment = Alignment.Center,
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current).data(url).build(),
+                    imageLoader = rememberEmbedLoader(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    onSuccess = { st ->
+                        val d = st.result.drawable
+                        if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) {
+                            ratio = d.intrinsicWidth.toFloat() / d.intrinsicHeight
+                        }
+                        onLoaded()
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    } else {
+        Box(
+            Modifier
+                .padding(top = 6.dp)
+                .fillMaxWidth()
+                .aspectRatio(1.78f)
+                .heightIn(max = 300.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(CanvasBlack)
+                .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
+                .clickable(onClick = onOpen),
+            contentAlignment = Alignment.Center,
+        ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (kind == MediaKind.VIDEO) "▶" else "♪", color = Color.White, fontSize = 34.sp)
+                Text("▶", color = Color.White, fontSize = 34.sp)
                 Text(
                     url.substringAfterLast('/').substringBefore('?').take(40),
                     color = TextSecondary,
