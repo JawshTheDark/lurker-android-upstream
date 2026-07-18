@@ -101,6 +101,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -130,6 +131,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.geometry.Offset
@@ -144,6 +146,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.ImageLoader
@@ -701,8 +704,6 @@ private fun ChatScreen(
     var draft by remember(buffer.key) {
         mutableStateOf(TextFieldValue(client.drafts[buffer.key] ?: ""))
     }
-    // Input-history recall cursor: null = live draft, else index into history.
-    var historyIdx by remember(buffer.key) { mutableStateOf<Int?>(null) }
     // Flush the draft when leaving this buffer.
     DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
     var showMembers by remember { mutableStateOf(false) }
@@ -1029,13 +1030,11 @@ private fun ChatScreen(
                     val newText = before + insert + after
                     return TextFieldValue(newText, TextRange(before.length + insert.length))
                 }
-                val history = client.inputHistory[buffer.key] ?: emptyList()
                 Composer(
                     draft = draft,
                     onChange = { new ->
                         val hadText = draft.text.isNotBlank()
                         draft = new
-                        historyIdx = null // editing exits history recall
                         client.setDraftLocal(buffer, new.text)
                         val hasText = new.text.isNotBlank()
                         // Commands never broadcast composing state.
@@ -1050,23 +1049,11 @@ private fun ChatScreen(
                     onAttach = { uploadPicker.launch("*/*") },
                     suggestions = suggestions,
                     onPickSuggestion = { draft = applySuggestion(it); client.setDraftLocal(buffer, draft.text) },
-                    canRecall = history.isNotEmpty(),
-                    onRecall = {
-                        if (history.isEmpty()) return@Composer
-                        val next = when (val i = historyIdx) {
-                            null -> history.lastIndex
-                            else -> (i - 1).coerceAtLeast(0)
-                        }
-                        historyIdx = next
-                        val line = history[next]
-                        draft = TextFieldValue(line, TextRange(line.length))
-                    },
                 ) {
                     val raw = draft.text.trim()
                     if (raw.isEmpty()) return@Composer
                     client.notifyTyping(buffer, active = false)
                     client.addInputHistory(buffer, raw)
-                    historyIdx = null
                     val myNick = buffer.networkId?.let { client.networks[it]?.nick }
                     val text = Commands.expandAlias(raw, client.aliases, myNick, buffer.target)
                     when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
@@ -1487,7 +1474,13 @@ private fun MessageBubble(
         // the same onLink route that already handles media URLs.
         if (Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
-            embeds.forEach { (url, kind) -> MediaEmbed(url, kind, onOpen = { onLink(url) }) }
+            embeds.forEach { (url, kind) ->
+                if (kind == MediaKind.AUDIO) {
+                    InlineAudioPlayer(url)
+                } else {
+                    MediaEmbed(url, kind, onOpen = { onLink(url) })
+                }
+            }
         }
         if (last) {
             Text(
@@ -1582,6 +1575,112 @@ private fun MediaEmbed(url: String, kind: MediaKind, onOpen: () -> Unit) {
                 )
             }
         }
+    }
+}
+
+/**
+ * Compact inline audio player for a chat bubble. Fixed height keeps the chat
+ * list's tail-follow / load-older anchoring stable (see [MediaEmbed]). The
+ * ExoPlayer is created lazily and only prepared on the first ▶, so audio links
+ * don't fetch until the user actually plays them. Tap the bar to seek.
+ */
+@Composable
+private fun InlineAudioPlayer(url: String) {
+    val context = LocalContext.current
+    val player = remember(url) { ExoPlayer.Builder(context).build() }
+    var prepared by remember(url) { mutableStateOf(false) }
+    var isPlaying by remember(url) { mutableStateOf(false) }
+    var positionMs by remember(url) { mutableStateOf(0L) }
+    var durationMs by remember(url) { mutableStateOf(0L) }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY && player.duration > 0) durationMs = player.duration
+                if (state == Player.STATE_ENDED) { player.seekTo(0); player.playWhenReady = false }
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener); player.release() }
+    }
+    // Poll position only while playing — no work when paused/idle.
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            positionMs = player.currentPosition
+            if (durationMs <= 0 && player.duration > 0) durationMs = player.duration
+            delay(400)
+        }
+    }
+    fun mmss(ms: Long): String {
+        val s = (ms / 1000).coerceAtLeast(0)
+        return "%d:%02d".format(s / 60, s % 60)
+    }
+    val frac = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+
+    Row(
+        Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth()
+            .height(58.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(CanvasBlack)
+            .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (isPlaying) "⏸" else "▶",
+            color = AccentBlue,
+            fontSize = 22.sp,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable {
+                    if (!prepared) {
+                        player.setMediaItem(MediaItem.fromUri(url))
+                        player.prepare()
+                        prepared = true
+                    }
+                    if (player.isPlaying) player.pause() else player.play()
+                }
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            Text(
+                url.substringAfterLast('/').substringBefore('?').take(40),
+                color = TextPrimary,
+                fontSize = 13.sp,
+                maxLines = 1,
+            )
+            Box(
+                Modifier
+                    .padding(top = 6.dp)
+                    .fillMaxWidth()
+                    .pointerInput(durationMs) {
+                        detectTapGestures { off ->
+                            if (durationMs > 0) {
+                                val f = (off.x / size.width).coerceIn(0f, 1f)
+                                val target = (f * durationMs).toLong()
+                                player.seekTo(target)
+                                positionMs = target
+                            }
+                        }
+                    },
+            ) {
+                LinearProgressIndicator(
+                    progress = { frac },
+                    color = AccentBlue,
+                    trackColor = SurfaceRaised,
+                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                )
+            }
+        }
+        Text(
+            if (durationMs > 0) "${mmss(positionMs)} / ${mmss(durationMs)}" else mmss(positionMs),
+            color = TextSecondary,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(start = 10.dp),
+        )
     }
 }
 
@@ -1855,8 +1954,6 @@ private fun Composer(
     onAttach: (() -> Unit)? = null,
     suggestions: List<String> = emptyList(),
     onPickSuggestion: (String) -> Unit = {},
-    canRecall: Boolean = false,
-    onRecall: () -> Unit = {},
     onSend: () -> Unit,
 ) {
     var showFormat by remember { mutableStateOf(false) }
@@ -1903,11 +2000,6 @@ private fun Composer(
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
                 )
-            }
-            if (canRecall) {
-                TextButton(onClick = onRecall) {
-                    Text("↑", color = TextSecondary, fontSize = 18.sp)
-                }
             }
             TextField(
                 value = draft,
