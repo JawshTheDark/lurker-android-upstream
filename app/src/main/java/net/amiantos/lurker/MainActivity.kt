@@ -743,7 +743,10 @@ private fun ChatScreen(
         derivedStateOf {
             val info = listState.layoutInfo
             val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= info.totalItemsCount - 2
+            // -3 (not -2): one extra row of slack absorbs the brief gap between a
+            // message appending and the follow-scroll catching up, so a busy
+            // channel doesn't flash "N new" while you're actually at the bottom.
+            lastVisible >= info.totalItemsCount - 3
         }
     }
     // The jump chip's count is DERIVED, not incremented: snapshot the newest id
