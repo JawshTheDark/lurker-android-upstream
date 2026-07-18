@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -348,6 +349,7 @@ private fun BufferListScreen(
     var topBarHeightPx by remember { mutableStateOf(0) }
 
     Box(Modifier.fillMaxSize().background(CanvasBlack)) {
+        AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
         val rows = remember(
             client.buffers.toList(),
             client.unread.toMap(),
@@ -417,7 +419,7 @@ private fun BufferListBody(
     onOpen: (Buffer) -> Unit,
 ) {
     LazyColumn(
-        Modifier.fillMaxSize().hazeSource(hazeState),
+        Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 1f),
         contentPadding = PaddingValues(
             top = topPadding + 4.dp,
             // Edge-to-edge list: keep the last rows above the navigation bar.
@@ -790,12 +792,15 @@ private fun ChatScreen(
     var bottomBarHeightPx by remember { mutableStateOf(0) }
 
     Box(Modifier.fillMaxSize().background(CanvasBlack)) {
+        // Ambient wash is the base haze source (zIndex 0) so the bars blur it even
+        // where the message list is sparse; messages layer on top at zIndex 1.
+        AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
         // Chat text follows the synced look.font.size.mobile setting (web px
         // ~ sp); +2 keeps the historical default (14 -> 16sp).
         val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().hazeSource(hazeState),
+            modifier = Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 1f),
             contentPadding = PaddingValues(
                 top = with(density) { topBarHeightPx.toDp() } + 4.dp,
                 // Composer overlay height when present (it already includes the
@@ -926,6 +931,33 @@ private fun ChatScreen(
                     .navigationBarsPadding()
                     .imePadding(),
             ) {
+                // Completion: the word under the cursor drives a suggestion strip —
+                // nicks in channels, /commands at line start. No Tab key on mobile.
+                val word = Completion.wordAt(draft.text, draft.selection.start)
+                val suggestions = remember(draft.text, draft.selection.start, client.members[buffer.key]) {
+                    when {
+                        word.text.startsWith("/") && word.start == 0 ->
+                            Completion.commands(word.text, Completion.VERBS)
+                        word.text.length >= 1 && !word.text.startsWith("/") -> {
+                            val recents = (client.messagesByBuffer[buffer.key] ?: emptyList())
+                                .asReversed().asSequence()
+                                .filter { !it.system && it.nick.isNotBlank() }
+                                .map { it.nick }.distinct().take(30).toList()
+                            val roster = client.members[buffer.key]?.map { it.nick } ?: emptyList()
+                            val self = buffer.networkId?.let { client.networks[it]?.nick }
+                            Completion.nicks(word.text, recents, roster, self).take(12)
+                        }
+                        else -> emptyList()
+                    }
+                }
+                fun applySuggestion(pick: String): TextFieldValue {
+                    val atLineStart = word.start == 0 && !pick.startsWith("/")
+                    val insert = pick + if (atLineStart) ", " else " "
+                    val before = draft.text.substring(0, word.start)
+                    val after = draft.text.substring((word.start + word.text.length).coerceAtMost(draft.text.length))
+                    val newText = before + insert + after
+                    return TextFieldValue(newText, TextRange(before.length + insert.length))
+                }
                 Composer(
                     draft = draft,
                     onChange = { new ->
@@ -942,6 +974,8 @@ private fun ChatScreen(
                     target = buffer.displayName,
                     uploading = client.uploading,
                     onAttach = { uploadPicker.launch("*/*") },
+                    suggestions = suggestions,
+                    onPickSuggestion = { draft = applySuggestion(it) },
                 ) {
                     val text = draft.text.trim()
                     if (text.isEmpty()) return@Composer
@@ -1718,10 +1752,33 @@ private fun Composer(
     target: String,
     uploading: Boolean = false,
     onAttach: (() -> Unit)? = null,
+    suggestions: List<String> = emptyList(),
+    onPickSuggestion: (String) -> Unit = {},
     onSend: () -> Unit,
 ) {
     var showFormat by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
+        if (suggestions.isNotEmpty()) {
+            LazyRow(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(suggestions.size) { i ->
+                    val s = suggestions[i]
+                    Text(
+                        s,
+                        color = AccentBlue,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .background(SurfaceRaised, RoundedCornerShape(14.dp))
+                            .border(0.5.dp, GlassBorder, RoundedCornerShape(14.dp))
+                            .clickable { onPickSuggestion(s) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                }
+            }
+        }
         if (showFormat) FormatBar(draft, onChange)
         Row(
             Modifier.fillMaxWidth().padding(10.dp, 6.dp),
