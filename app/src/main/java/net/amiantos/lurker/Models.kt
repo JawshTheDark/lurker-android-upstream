@@ -56,12 +56,8 @@ data class DccTransfer(
     val progress: Float
         get() = if (total > 0) (received.toFloat() / total).coerceIn(0f, 1f) else 0f
     val isPending: Boolean get() = state == "pending_approval"
-    val isSend: Boolean get() = direction == "send"
     val isActive: Boolean
-        get() = state in setOf(
-            "connecting", "receiving", "stalled", "verifying", "requested",
-            "offering", "sending", // outgoing-send states
-        )
+        get() = state in setOf("connecting", "receiving", "stalled", "verifying", "requested")
     val isTerminal: Boolean
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
 }

@@ -1434,52 +1434,6 @@ class LurkerClient {
         }
     }
 
-    /**
-     * Offer a file to [nick] over DCC SEND. Bytes go up as multipart; the server
-     * stages them in its DCC dir and CTCP-offers the peer (active or passive per
-     * server config + dcc.prefer_passive). Progress arrives as dcc-transfer frames.
-     */
-    fun dccSendFile(networkId: Int, nick: String, filename: String, fileBody: okhttp3.RequestBody) = io.execute {
-        try {
-            val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-                .addFormDataPart("networkId", networkId.toString())
-                .addFormDataPart("nick", nick)
-                .addFormDataPart("file", filename, fileBody)
-                .build()
-            http.newCall(authed("/api/dcc/send").post(body).build()).execute().use { res ->
-                val bodyText = res.body?.string().orEmpty()
-                if (!res.isSuccessful) {
-                    val err = runCatching { JSONObject(bodyText).optString("error") }.getOrNull()
-                    post { dccError = err?.ifEmpty { null } ?: "DCC send failed (HTTP ${res.code})" }
-                    return@execute
-                }
-                JSONObject(bodyText).optJSONObject("transfer")?.let {
-                    post { dccEnabled = true; dccError = null; applyTransfer(it) }
-                }
-            }
-        } catch (e: Exception) {
-            post { dccError = "DCC send failed: ${e.message}" }
-        }
-    }
-
-    /** Open (or close) a DCC chat with [nick]. The chat lives in the "=nick" buffer. */
-    fun dccChat(networkId: Int, nick: String, open: Boolean) = io.execute {
-        try {
-            val path = if (open) "/api/dcc/chat" else "/api/dcc/chat/close"
-            val body = JSONObject().put("networkId", networkId).put("nick", nick)
-                .toString().toRequestBody(json)
-            http.newCall(authed(path).post(body).build()).execute().use { res ->
-                if (!res.isSuccessful) {
-                    val err = runCatching {
-                        JSONObject(res.body?.string().orEmpty()).optString("error")
-                    }.getOrNull()
-                    post { dccError = err?.ifEmpty { null } ?: "DCC chat failed (HTTP ${res.code})" }
-                }
-            }
-        } catch (e: Exception) {
-            post { dccError = "DCC chat failed: ${e.message}" }
-        }
-    }
 
     // ---- Search + highlights ------------------------------------------------
 
