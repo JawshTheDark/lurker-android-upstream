@@ -1981,24 +1981,34 @@ private fun Composer(
         }
         if (showFormat) FormatBar(draft, onChange)
         Row(
-            Modifier.fillMaxWidth().padding(10.dp, 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            // Compact glyph buttons (not TextButtons) so the input gets the room.
             if (onAttach != null) {
-                TextButton(onClick = onAttach, enabled = !uploading) {
+                Box(
+                    Modifier.size(34.dp).clip(CircleShape)
+                        .clickable(enabled = !uploading, onClick = onAttach),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Text(
                         if (uploading) "…" else "+",
                         color = if (uploading) TextSecondary else AccentBlue,
-                        fontSize = 22.sp,
+                        fontSize = 24.sp,
                     )
                 }
             }
-            TextButton(onClick = { showFormat = !showFormat }) {
+            Box(
+                Modifier.size(34.dp).clip(CircleShape)
+                    .clickable { showFormat = !showFormat },
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
                     "Aa",
                     color = if (showFormat) AccentBlue else TextSecondary,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 16.sp,
+                    fontSize = 15.sp,
                 )
             }
             TextField(
@@ -2017,11 +2027,16 @@ private fun Composer(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { onSend() }),
             )
-            TextButton(onClick = onSend, enabled = draft.text.isNotBlank()) {
+            val canSend = draft.text.isNotBlank()
+            Box(
+                Modifier.size(38.dp).clip(CircleShape)
+                    .clickable(enabled = canSend, onClick = onSend),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    "Send",
-                    color = if (draft.text.isNotBlank()) AccentBlue else TextSecondary,
-                    fontWeight = FontWeight.SemiBold,
+                    "➤",
+                    color = if (canSend) AccentBlue else TextSecondary,
+                    fontSize = 20.sp,
                 )
             }
         }
