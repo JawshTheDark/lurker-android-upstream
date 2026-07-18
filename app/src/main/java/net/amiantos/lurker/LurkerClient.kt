@@ -451,6 +451,9 @@ class LurkerClient {
                 seedUnread(buffer.key, frame)
                 if (frame.has("lastReadId")) lastRead[buffer.key] = frame.optLong("lastReadId")
                 if (frame.has("hasMoreOlder")) hasMoreOlder[buffer.key] = frame.optBoolean("hasMoreOlder")
+                // Reopening a buffer: once the fresh backlog hydrates, tell the
+                // server we're caught up to what it just showed us.
+                scheduleMarkRead(buffer.key)
             }
 
             "irc" -> {
@@ -477,6 +480,7 @@ class LurkerClient {
                 val msg = parseEvent(frame) ?: return
                 mergeInto(buffer.key, listOf(msg), replace = false)
                 countUnread(buffer.key, frame, msg)
+                if (msg.id > 0) scheduleMarkRead(buffer.key)
             }
 
             "read-state" -> {
@@ -827,6 +831,7 @@ class LurkerClient {
     fun setActive(buffer: Buffer?) {
         val prev = activeKey
         activeKey = buffer?.key
+        activeBuffer = buffer
         if (prev != null && prev != buffer?.key) dividerAfter.remove(prev)
         val key = buffer?.key ?: return
         // Anchor the New-messages divider before the badge and cursor move.
@@ -835,6 +840,26 @@ class LurkerClient {
         unread.remove(key)
         highlights.remove(key)
         markRead(buffer)
+    }
+
+    private var activeBuffer: Buffer? = null
+    private var markReadQueued = false
+
+    /**
+     * Keep the server's read cursor at our heels while a buffer is focused:
+     * every persisted event that lands in the active buffer (fresh backlog on
+     * reopen included) queues a mark-read, batched to at most one every 1.5s so
+     * a busy channel doesn't chatter the socket. Without this, only the moment
+     * of opening was marked — everything watched afterwards stayed "unread" on
+     * the server and every other device.
+     */
+    private fun scheduleMarkRead(key: String) {
+        if (key != activeKey || markReadQueued) return
+        markReadQueued = true
+        main.postDelayed({
+            markReadQueued = false
+            activeBuffer?.takeIf { it.key == activeKey }?.let(::markRead)
+        }, 1_500)
     }
 
     private fun markRead(buffer: Buffer) {
