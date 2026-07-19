@@ -1021,6 +1021,10 @@ private fun ChatScreen(
     }
     // Flush the draft when leaving this buffer.
     DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
+    // If this buffer is closed out from under us (/part, /close, or a close from
+    // another device), leave the chat view rather than stranding an empty one.
+    val stillOpen = client.buffers.any { it.key == buffer.key }
+    LaunchedEffect(stillOpen) { if (!stillOpen && client.buffers.isNotEmpty()) onBack() }
     // Prefix the composer with "nick: " — the shared reply seam for the
     // long-press action sheet and the swipe-to-reply gesture.
     fun replyTo(m: Msg) {

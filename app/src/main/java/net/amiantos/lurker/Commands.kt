@@ -132,7 +132,10 @@ object Commands {
                     isChannel(parts[0]) -> parts.getOrNull(1)
                     else -> rest
                 }
-                ParsedInput.Ops(listOf(WireOp("part", channel = chan, reason = reason)))
+                // An explicit /part leaves AND closes the buffer. close-buffer
+                // sends the PART (with reason) server-side and removes the row —
+                // /cycle keeps its bare "part" op to leave without closing.
+                ParsedInput.Ops(listOf(WireOp("close", target = chan, reason = reason)))
             }
 
             "close" -> ParsedInput.Ops(listOf(WireOp("close", target = currentTarget)))
