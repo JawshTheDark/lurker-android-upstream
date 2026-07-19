@@ -21,7 +21,12 @@ import androidx.core.app.NotificationManagerCompat
 object Notifier {
     private const val CHANNEL_MENTIONS = "mentions"
     private const val CHANNEL_DMS = "dms"
-    const val CHANNEL_SERVICE = "connection"
+    // Bumped from "connection" (was IMPORTANCE_LOW) so existing installs pick up
+    // the quieter IMPORTANCE_MIN — Android locks a channel's importance after
+    // creation, so lowering it requires a new channel id. The old one is deleted
+    // in ensureChannels.
+    const val CHANNEL_SERVICE = "connection_quiet"
+    private const val CHANNEL_SERVICE_OLD = "connection"
     const val EXTRA_NETWORK_ID = "lurker.networkId"
     const val EXTRA_TARGET = "lurker.target"
 
@@ -33,9 +38,13 @@ object Notifier {
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL_DMS, "Direct messages", NotificationManager.IMPORTANCE_HIGH),
         )
-        // Silent, low-key ongoing notification for the opt-in background service.
+        // Silent, minimal ongoing notification for the opt-in background service:
+        // IMPORTANCE_MIN keeps it out of the status bar and collapsed at the bottom
+        // of the shade — a quiet "permanent" indicator rather than a recurring alert
+        // (freaky: it kept reappearing and demanding a swipe).
+        mgr.deleteNotificationChannel(CHANNEL_SERVICE_OLD)
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL_SERVICE, "Background connection", NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CHANNEL_SERVICE, "Background connection", NotificationManager.IMPORTANCE_MIN).apply {
                 setShowBadge(false)
             },
         )

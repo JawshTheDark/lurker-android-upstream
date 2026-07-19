@@ -43,12 +43,15 @@ class LurkerConnectionService : Service() {
         )
         val notif = NotificationCompat.Builder(this, Notifier.CHANNEL_SERVICE)
             .setSmallIcon(R.drawable.ic_stat_notification)
-            .setContentTitle("Lurker is staying connected")
+            // Flavor-aware name: "Spooky for Lurker" on the Spooky build, not "Lurker".
+            .setContentTitle("${getString(R.string.app_name)} is staying connected")
             .setContentText("Highlights and DMs will notify you in the background.")
             .setContentIntent(open)
             .addAction(0, "Stop", stop)
             .setOngoing(true)
             .setShowWhen(false)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
