@@ -291,6 +291,17 @@ class MainActivity : FragmentActivity() {
                     }
                 }
 
+                // The channel we actually joined (channel-joined) — or an
+                // already-open channel we asked to /join — opens itself.
+                LaunchedEffect(client.pendingOpen) {
+                    client.pendingOpen?.let { buffer ->
+                        client.open(buffer)
+                        client.setActive(buffer)
+                        screen = Screen.Chat(buffer)
+                        client.pendingOpen = null
+                    }
+                }
+
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     // Width tiers. THREE-pane (>=1100dp, e.g. landscape tablet):
                     // list | chat | roster, all persistent. TWO-pane (840–1100dp,
@@ -408,10 +419,9 @@ class MainActivity : FragmentActivity() {
                     Screen.ChannelList -> ChannelListScreen(
                         client = client,
                         onJoin = { networkId, chan ->
-                            client.execute(client.focusTarget(networkId, chan), listOf(WireOp("join", channel = chan)))
-                            val buffer = client.focusTarget(networkId, chan)
-                            client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            // Don't optimistically open — channel-joined focuses the
+                            // channel we actually land in (avoids the forwarded ghost).
+                            client.join(networkId, chan)
                         },
                         onBack = { screen = Screen.Buffers },
                     )
@@ -1165,10 +1175,7 @@ private fun ChatScreen(
             confirmButton = {
                 TextButton(onClick = {
                     joinPrompt = null
-                    buffer.networkId?.let { networkId ->
-                        client.execute(buffer, listOf(WireOp("join", channel = chan)))
-                        onOpenBuffer(client.focusTarget(networkId, chan))
-                    }
+                    buffer.networkId?.let { networkId -> client.join(networkId, chan) }
                 }) { Text("Join", color = AccentBlue, fontWeight = FontWeight.SemiBold) }
             },
             dismissButton = {

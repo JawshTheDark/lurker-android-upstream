@@ -104,6 +104,14 @@ class LurkerClient {
     /** "networkId::nickLower" -> presence state (online/offline/away/back). */
     val presence = mutableStateMapOf<String, String>()
 
+    /** One-shot: the UI opens+focuses this buffer. Set when we actually join a
+     *  channel (channel-joined) — which a 470 forward can rename vs. the request. */
+    var pendingOpen: Buffer? by mutableStateOf(null)
+
+    /** networkId -> (requested channel, requestedAt) for a user join, so the real
+     *  channel-joined can retarget focus + drop the ghost requested buffer. */
+    private val pendingJoin = mutableMapOf<Int, Pair<String, Long>>()
+
     /** True while the Activity is in the foreground (badge is enough; no notif). */
     private var appForeground = true
 
@@ -297,6 +305,8 @@ class LurkerClient {
             inputHistory.clear()
             aliases.clear()
             ignores.clear()
+            pendingOpen = null
+            pendingJoin.clear()
             serverExtended = false
             bookmarkIds.clear()
             contacts.clear()
@@ -633,6 +643,30 @@ class LurkerClient {
                     }
                     return
                 }
+                // The authoritative "you actually joined this channel" signal (per
+                // amiantos). Create the buffer here — NOT on buffer-opened — and, if
+                // it fulfils a join the user just asked for, focus it. A 470 forward
+                // makes the joined channel differ from the request, so drop the ghost
+                // requested buffer. Reconnect re-joins (no recent pendingJoin) just
+                // ensure the buffer exists without stealing focus.
+                if (frame.optString("type") == "channel-joined") {
+                    val joined = ensureBuffer(networkId, target)
+                    val pend = networkId?.let { pendingJoin[it] }
+                    if (networkId != null && pend != null &&
+                        System.currentTimeMillis() - pend.second < JOIN_FOCUS_WINDOW_MS
+                    ) {
+                        pendingJoin.remove(networkId)
+                        if (!target.equals(pend.first, true)) {
+                            val ghost = "$networkId::${pend.first}"
+                            buffers.removeAll { it.key == ghost }
+                            messagesByBuffer.remove(ghost)
+                            unread.remove(ghost)
+                            highlights.remove(ghost)
+                        }
+                        pendingOpen = joined
+                    }
+                    return
+                }
                 bumpCursor(frame.optLong("id"))
                 val buffer = ensureBuffer(networkId, target)
                 // Roster updates ride the same stream; apply before the renderable
@@ -660,10 +694,27 @@ class LurkerClient {
                 if (frame.has("lastReadId")) lastRead[key] = frame.optLong("lastReadId")
             }
 
-            "buffer-opened", "buffer-reopened" -> {
+            "buffer-reopened" -> {
+                // A reopen of a previously-closed buffer is authoritative — recreate it.
                 val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
                 val target = frame.optString("target")
                 if (target.isNotEmpty()) ensureBuffer(networkId, target)
+            }
+
+            "buffer-opened" -> {
+                val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
+                val target = frame.optString("target")
+                if (target.isEmpty()) return
+                // Per amiantos: buffer-opened is only a FOCUS HINT — sufficient where
+                // nothing can fail (DMs, or a buffer we already have). A *new* channel
+                // must NOT be created here: a 470 forward/redirect makes the joined
+                // channel differ from the requested one, which is exactly what left the
+                // ghost "#apple" buffer. New channels are created on channel-joined
+                // (fresh join) or from the snapshot (already joined).
+                val key = "${networkId ?: "sys"}::$target"
+                if (buffers.any { it.key == key } || !Commands.isChannel(target)) {
+                    ensureBuffer(networkId, target)
+                }
             }
 
             "buffer-closed" -> {
@@ -1395,6 +1446,22 @@ class LurkerClient {
     }
 
     /** Execute the parsed composer input against [buffer]. */
+    /** Record a user-initiated join so channel-joined can focus the channel we
+     *  actually land in (a 470 forward can rename it) and drop the ghost request. */
+    private fun noteJoinRequest(networkId: Int, channel: String) {
+        pendingJoin[networkId] = channel to System.currentTimeMillis()
+    }
+
+    /** Join a channel WITHOUT optimistically creating its buffer (per amiantos —
+     *  channels are pending until channel-joined). The transient Buffer only
+     *  carries the networkId to execute; it's never added to the buffer list. */
+    fun join(networkId: Int, channel: String) {
+        execute(
+            Buffer(networkId, channel, networks[networkId]?.name ?: ""),
+            listOf(WireOp("join", channel = channel)),
+        )
+    }
+
     fun execute(buffer: Buffer, ops: List<WireOp>) {
         val networkId = buffer.networkId ?: return
         val socket = ws ?: return
@@ -1415,7 +1482,16 @@ class LurkerClient {
                 "raw" -> frame.put("type", "raw").put("line", op.line)
                 // {type:'e2e', networkId, target, args} — server runs the subcommand.
                 "e2e" -> frame.put("type", "e2e").put("target", target).put("args", op.line.orEmpty())
-                "join" -> frame.put("type", "join").put("channel", op.channel)
+                "join" -> {
+                    frame.put("type", "join").put("channel", op.channel)
+                    op.channel?.let { ch ->
+                        val existing = buffers.firstOrNull { it.key == "$networkId::$ch" }
+                        // Already joined: just focus it. Otherwise note the request so
+                        // channel-joined focuses the channel we actually land in (a 470
+                        // forward can rename it) — the buffer isn't created until then.
+                        if (existing != null) pendingOpen = existing else noteJoinRequest(networkId, ch)
+                    }
+                }
                 "part" -> {
                     frame.put("type", "part").put("channel", op.channel)
                     op.reason?.let { frame.put("reason", it) }
@@ -2009,6 +2085,9 @@ class LurkerClient {
 
         /** Backgrounds shorter than this (task-switcher hops) skip the cycle. */
         const val BACKGROUND_CYCLE_MS = 3_000L
+
+        /** A channel-joined within this of the join request focuses that channel. */
+        const val JOIN_FOCUS_WINDOW_MS = 15_000L
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }

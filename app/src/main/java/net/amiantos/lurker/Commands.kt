@@ -120,7 +120,10 @@ object Commands {
                 val chan = normalizeChannel(parts[0])
                 // A key can't ride the structured join op, so fall to raw for that.
                 if (parts.size == 2) raw("JOIN $chan ${parts[1]}")
-                else ParsedInput.Ops(listOf(WireOp("join", channel = chan)), openTarget = chan)
+                // No openTarget: don't optimistically open the requested channel — a
+                // 470 forward can land us elsewhere. The join op focuses it (if already
+                // joined) or channel-joined focuses the channel we actually land in.
+                else ParsedInput.Ops(listOf(WireOp("join", channel = chan)))
             }
 
             "part", "leave" -> {

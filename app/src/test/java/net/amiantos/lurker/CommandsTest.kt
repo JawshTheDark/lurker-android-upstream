@@ -56,11 +56,13 @@ class CommandsTest {
     }
 
     @Test
-    fun joinNormalizesChannelAndSetsOpenTarget() {
+    fun joinNormalizesChannelAndDoesNotOptimisticallyOpen() {
         val r = ops("/join lobby")
         assertEquals("join", r.ops[0].type)
         assertEquals("#lobby", r.ops[0].channel)
-        assertEquals("#lobby", r.openTarget)
+        // No openTarget: channels are pending until channel-joined (a 470 forward
+        // could land us elsewhere), so we don't optimistically open the request.
+        assertEquals(null, r.openTarget)
     }
 
     @Test
