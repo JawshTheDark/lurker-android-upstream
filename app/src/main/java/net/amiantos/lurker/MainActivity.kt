@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
@@ -40,6 +41,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -237,6 +239,37 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    // EXPANDED width → the buffer list and chat share the screen in
+                    // TabletHome; only leaf destinations (Settings, Search, …) take
+                    // over full-screen. Below the gate, the phone flow is unchanged.
+                    val expanded = maxWidth >= 840.dp
+                    val roomForRoster = maxWidth >= 1100.dp
+                    val active = screen
+                    if (expanded && (active == Screen.Buffers || active is Screen.Chat)) {
+                        TabletHome(
+                            client = client,
+                            selectedBuffer = (active as? Screen.Chat)?.buffer,
+                            sharedUri = sharedUri,
+                            onShareConsumed = { sharedUri = null },
+                            sharePending = sharedUri != null,
+                            onSelect = { buffer ->
+                                client.open(buffer)
+                                client.setActive(buffer)
+                                screen = Screen.Chat(buffer)
+                            },
+                            onDeselect = { client.setActive(null); screen = Screen.Buffers },
+                            onSettings = { client.loadSettings(); screen = Screen.Settings },
+                            onDcc = { client.loadDcc(); screen = Screen.Dcc },
+                            onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
+                            onSearch = { screen = Screen.Search },
+                            onFriends = { screen = Screen.Friends },
+                            onBrowse = { screen = Screen.ChannelList },
+                            onSignOut = { client.signOut() },
+                            showRoster = roomForRoster,
+                        )
+                        return@BoxWithConstraints
+                    }
                 when (val s = screen) {
                     Screen.Buffers -> BufferListScreen(
                         client = client,
@@ -313,6 +346,7 @@ class MainActivity : ComponentActivity() {
                         onBack = { screen = Screen.Networks },
                     )
                 }
+                }
             }
         }
     }
@@ -350,6 +384,98 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         client.onBackground()
+    }
+}
+
+/**
+ * Tablet / landscape three-pane home (EXPANDED width): a persistent buffer-list
+ * rail | the selected buffer's chat | the channel roster. The phone keeps its
+ * screen-by-screen flow untouched; this is only reached above the width gate.
+ * Settings/Search/Networks/etc. still open as full-screen overlays through the
+ * same handlers the rail invokes.
+ */
+@Composable
+private fun TabletHome(
+    client: LurkerClient,
+    selectedBuffer: Buffer?,
+    sharedUri: Uri?,
+    onShareConsumed: () -> Unit,
+    sharePending: Boolean,
+    onSelect: (Buffer) -> Unit,
+    onDeselect: () -> Unit,
+    onSettings: () -> Unit,
+    onDcc: () -> Unit,
+    onNetworks: () -> Unit,
+    onSearch: () -> Unit,
+    onFriends: () -> Unit,
+    onBrowse: () -> Unit,
+    onSignOut: () -> Unit,
+    // Below ~1100dp (e.g. tablet portrait) there isn't room for a third column,
+    // so the roster collapses back to the modal sheet inside ChatScreen.
+    showRoster: Boolean,
+) {
+    val context = LocalContext.current
+    // DCC send from the roster pane: hold the target across the system picker.
+    var dccNick by remember { mutableStateOf<String?>(null) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val nick = dccNick
+        dccNick = null
+        val networkId = selectedBuffer?.networkId
+        if (uri != null && nick != null && networkId != null) {
+            val upload = readUpload(context, uri)
+            if (upload == null) client.dccError = "Couldn't read that file."
+            else client.dccSendFile(networkId, nick, upload.first, upload.second)
+        }
+    }
+    Row(Modifier.fillMaxSize().background(CanvasBlack)) {
+        // Left rail — the full buffer list, overflow menu and all.
+        Box(Modifier.width(340.dp).fillMaxHeight()) {
+            BufferListScreen(
+                client = client,
+                sharePending = sharePending,
+                onOpen = onSelect,
+                onSettings = onSettings,
+                onDcc = onDcc,
+                onNetworks = onNetworks,
+                onSearch = onSearch,
+                onFriends = onFriends,
+                onBrowse = onBrowse,
+                onSignOut = onSignOut,
+            )
+        }
+        VerticalDivider(color = GlassBorder, thickness = 0.5.dp)
+        // Middle — the selected conversation.
+        Box(Modifier.weight(1f).fillMaxHeight()) {
+            if (selectedBuffer != null) {
+                ChatScreen(
+                    client = client,
+                    buffer = selectedBuffer,
+                    sharedUri = sharedUri,
+                    onShareConsumed = onShareConsumed,
+                    onBack = onDeselect,
+                    onOpenBuffer = onSelect,
+                    embedded = true,
+                    // No room for a roster column → keep the modal-sheet button.
+                    showMembersButton = !showRoster,
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Select a conversation", color = TextSecondary, fontSize = 15.sp)
+                }
+            }
+        }
+        // Right — the roster, for channels only (DMs have none) when there's room.
+        if (showRoster && selectedBuffer?.isChannel == true) {
+            VerticalDivider(color = GlassBorder, thickness = 0.5.dp)
+            Box(Modifier.width(260.dp).fillMaxHeight()) {
+                MemberPane(
+                    client = client,
+                    buffer = selectedBuffer,
+                    onOpenBuffer = onSelect,
+                    onPickFileFor = { nick -> dccNick = nick; filePicker.launch("*/*") },
+                )
+            }
+        }
     }
 }
 
@@ -756,8 +882,14 @@ private fun ChatScreen(
     onShareConsumed: () -> Unit = {},
     onBack: () -> Unit,
     onOpenBuffer: (Buffer) -> Unit,
+    // The middle pane of the tablet layout: the buffer list is a persistent rail,
+    // so this hides the back arrow and yields the back gesture to the host.
+    embedded: Boolean = false,
+    // Whether to show the roster button that opens the modal member sheet. In the
+    // full three-pane layout the roster is its own pane, so this is turned off.
+    showMembersButton: Boolean = true,
 ) {
-    BackHandler(onBack = onBack)
+    BackHandler(enabled = !embedded, onBack = onBack)
     // Seed the composer from the server-synced draft when the buffer opens.
     var draft by remember(buffer.key) {
         mutableStateOf(TextFieldValue(client.drafts[buffer.key] ?: ""))
@@ -1018,7 +1150,9 @@ private fun ChatScreen(
             CenterAlignedTopAppBar(
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                    if (!embedded) {
+                        TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                    }
                 },
                 title = {
                     var titleMenu by remember { mutableStateOf(false) }
@@ -1029,7 +1163,7 @@ private fun ChatScreen(
                                 .background(SurfaceDark, RoundedCornerShape(18.dp))
                                 .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
                                 .combinedClickable(
-                                    onClick = onBack,
+                                    onClick = { if (!embedded) onBack() },
                                     onLongClick = {
                                         if (!buffer.isSystem && !buffer.isServerBuffer) titleMenu = true
                                     },
@@ -1068,7 +1202,7 @@ private fun ChatScreen(
                     }
                 },
                 actions = {
-                    if (buffer.isChannel) {
+                    if (buffer.isChannel && showMembersButton) {
                         val count = client.members[buffer.key]?.size ?: 0
                         TextButton(onClick = { showMembers = true }) {
                             Text(
@@ -1344,34 +1478,7 @@ private fun MemberSheet(
                     modifier = Modifier.fillMaxWidth().padding(24.dp),
                 )
             }
-            LazyColumn(Modifier.heightIn(max = 460.dp)) {
-                items(roster.size) { i ->
-                    val m = roster[i]
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { selected = m }
-                            .padding(horizontal = 22.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            m.prefix.ifEmpty { " " },
-                            color = if (m.canModerate) NoticeAmber else OnlineGreen,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.width(20.dp),
-                        )
-                        Text(
-                            m.nick,
-                            color = nickColor(m.nick).copy(alpha = if (m.away) 0.45f else 1f),
-                            fontSize = 16.sp,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (m.away) Text("away", color = TextSecondary, fontSize = 12.sp)
-                    }
-                }
-                item { Spacer(Modifier.height(24.dp)) }
-            }
+            RosterList(roster, Modifier.heightIn(max = 460.dp)) { selected = it }
         } else {
             MemberActions(
                 client = client,
@@ -1380,6 +1487,92 @@ private fun MemberSheet(
                 canModerate = client.myMember(buffer)?.canModerate == true,
                 onBack = { selected = null },
                 onDone = onDismiss,
+                onOpenBuffer = onOpenBuffer,
+                onPickFileFor = onPickFileFor,
+            )
+        }
+    }
+}
+
+/** The channel roster rows, shared by the phone member sheet and the tablet
+ *  right pane. Rank-prefix glyph, nick (dimmed when away), and an away tag. */
+@Composable
+private fun RosterList(
+    roster: List<Member>,
+    modifier: Modifier = Modifier,
+    onSelect: (Member) -> Unit,
+) {
+    LazyColumn(modifier) {
+        items(roster.size) { i ->
+            val m = roster[i]
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(m) }
+                    .padding(horizontal = 22.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    m.prefix.ifEmpty { " " },
+                    color = if (m.canModerate) NoticeAmber else OnlineGreen,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(20.dp),
+                )
+                Text(
+                    m.nick,
+                    color = nickColor(m.nick).copy(alpha = if (m.away) 0.45f else 1f),
+                    fontSize = 16.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                if (m.away) Text("away", color = TextSecondary, fontSize = 12.sp)
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+/** Persistent right-hand roster for the tablet three-pane layout. Same roster +
+ *  nick-actions flow as [MemberSheet], but always-on rather than a modal sheet. */
+@Composable
+private fun MemberPane(
+    client: LurkerClient,
+    buffer: Buffer,
+    onOpenBuffer: (Buffer) -> Unit,
+    onPickFileFor: (String) -> Unit,
+) {
+    var selected by remember(buffer.key) { mutableStateOf<Member?>(null) }
+    val roster = remember(client.members[buffer.key]) {
+        (client.members[buffer.key] ?: emptyList())
+            .sortedWith(compareBy({ it.rank }, { it.nick.lowercase() }))
+    }
+    Column(Modifier.fillMaxSize().background(SurfaceDark).padding(top = 12.dp)) {
+        val sel = selected
+        if (sel == null) {
+            Text(
+                "${roster.size} member${if (roster.size == 1) "" else "s"}",
+                color = TextSecondary,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 6.dp),
+            )
+            if (roster.isEmpty()) {
+                Text(
+                    "No member list yet — the server sends it when the channel is joined.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().padding(22.dp),
+                )
+            }
+            RosterList(roster, Modifier.fillMaxSize()) { selected = it }
+        } else {
+            MemberActions(
+                client = client,
+                buffer = buffer,
+                member = sel,
+                canModerate = client.myMember(buffer)?.canModerate == true,
+                onBack = { selected = null },
+                onDone = { selected = null },
                 onOpenBuffer = onOpenBuffer,
                 onPickFileFor = onPickFileFor,
             )
