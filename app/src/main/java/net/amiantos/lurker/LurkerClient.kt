@@ -1233,6 +1233,18 @@ class LurkerClient {
         val id = e.optLong("id")
         val nick = e.optString("nick", "*")
         val text = e.optString("text")
+        // Automated TAGMSG/BATCH "unknown command" bounces: a typing notification
+        // (client-only tag carried over TAGMSG) that a network without the
+        // message-tags cap rejects with 421. The user never typed it, so drop the
+        // bounce instead of showing a red error line. Structured field first, with
+        // a text fallback for servers that don't tag it ("unknown_command TAGMSG …").
+        val unknownCmd = e.optString("unknownCommand")
+        if (unknownCmd == "TAGMSG" || unknownCmd == "BATCH") return null
+        if (type == "error" && text.startsWith("unknown_command ") &&
+            (text.contains("TAGMSG") || text.contains("BATCH"))
+        ) {
+            return null
+        }
         return when (type) {
             "message", "action", "notice", "error" -> Msg(
                 id = id, type = type, nick = nick, text = text,
