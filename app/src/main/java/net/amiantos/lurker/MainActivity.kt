@@ -1919,14 +1919,18 @@ private fun MessageBubble(
 ) {
     val self = msg.self
     // Swipe a bubble sideways to reply (reuses the long-press reply seam). The
-    // bubble tracks the drag; releasing past the threshold fires, with a haptic.
-    val offsetX = remember(msg.id) { androidx.compose.animation.core.Animatable(0f) }
-    val dragScope = rememberCoroutineScope()
+    // live drag is a plain float (synchronous, no per-delta coroutine that could
+    // land after the release); the Animatable only drives the spring back so the
+    // bubble always returns to place.
+    var dragPx by remember(msg.id) { mutableStateOf(0f) }
+    val settleAnim = remember(msg.id) { androidx.compose.animation.core.Animatable(0f) }
+    var settling by remember(msg.id) { mutableStateOf(false) }
     val density = LocalDensity.current
     val haptics = LocalHapticFeedback.current
     val maxDragPx = with(density) { 72.dp.toPx() }
     val triggerPx = with(density) { 56.dp.toPx() }
     var firedThisDrag by remember(msg.id) { mutableStateOf(false) }
+    val shownX = if (settling) settleAnim.value else dragPx
     // Grouping reads through the corners: the shared edge between messages of
     // one group is tightened, the outside stays fully rounded.
     val big = 18.dp
@@ -1944,23 +1948,26 @@ private fun MessageBubble(
             .then(
                 if (onSwipeReply != null) {
                     Modifier
-                        .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                        .offset { IntOffset(shownX.roundToInt(), 0) }
                         .draggable(
                             orientation = Orientation.Horizontal,
                             state = rememberDraggableState { delta ->
-                                dragScope.launch {
-                                    val next = (offsetX.value + delta).coerceIn(0f, maxDragPx)
-                                    if (next >= triggerPx && !firedThisDrag) {
-                                        firedThisDrag = true
-                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    }
-                                    offsetX.snapTo(next)
+                                val next = (dragPx + delta).coerceIn(0f, maxDragPx)
+                                if (next >= triggerPx && !firedThisDrag) {
+                                    firedThisDrag = true
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 }
+                                dragPx = next
                             },
                             onDragStopped = {
-                                if (offsetX.value >= triggerPx) onSwipeReply(msg)
+                                val reached = dragPx >= triggerPx
+                                settleAnim.snapTo(dragPx)
+                                settling = true
+                                if (reached) onSwipeReply(msg)
+                                settleAnim.animateTo(0f)
+                                dragPx = 0f
+                                settling = false
                                 firedThisDrag = false
-                                offsetX.animateTo(0f)
                             },
                         )
                 } else Modifier,
