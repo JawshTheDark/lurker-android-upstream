@@ -1289,6 +1289,16 @@ class LurkerClient {
     /** Presence state for a contact target, or null if unknown. */
     fun presenceOf(t: ContactTarget): String? = presence["${t.networkId}::${t.nick.lowercase()}"]
 
+    /** A network's display name, for synthesizing a buffer row we don't hold yet. */
+    fun networkName(id: Int): String = networkNames[id] ?: "network"
+
+    /** True when a nick is known to be present (online/away/back — anything but
+     *  an explicit offline). Used to sort + dot the Friends buffer-list section. */
+    fun isPresent(networkId: Int?, nick: String): Boolean {
+        val st = presence["${networkId}::${nick.lowercase()}"]
+        return st != null && st != "offline"
+    }
+
     /** Create (contactId=null) or update a contact, then let the server echo it back. */
     fun setContact(contactId: Int?, displayName: String, notifyOnline: Boolean, targets: List<ContactTarget>) {
         val arr = JSONArray()

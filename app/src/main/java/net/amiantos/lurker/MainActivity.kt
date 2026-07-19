@@ -313,7 +313,11 @@ class MainActivity : FragmentActivity() {
                     val twoPane = maxWidth >= 840.dp && !threePane
                     val active = screen
                     val onSelectBuffer: (Buffer) -> Unit = { buffer ->
-                        client.open(buffer); client.setActive(buffer); screen = Screen.Chat(buffer)
+                        // Materialize a synthesized Friends row before selecting (see the
+                        // phone onOpen note); focusTarget returns held buffers unchanged.
+                        val b = buffer.networkId?.let { client.focusTarget(it, buffer.target) }
+                            ?: buffer.also { client.open(it) }
+                        client.setActive(b); screen = Screen.Chat(b)
                     }
                     if (threePane && (active == Screen.Buffers || active is Screen.Chat)) {
                         TabletHome(
@@ -359,9 +363,15 @@ class MainActivity : FragmentActivity() {
                         client = client,
                         sharePending = sharedUri != null,
                         onOpen = { buffer ->
-                            client.open(buffer)
-                            client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            // A synthesized Friends row isn't in client.buffers yet —
+                            // materialize it (ensureBuffer + open-buffer) so Chat opens
+                            // a real, hydrating buffer instead of an orphan. focusTarget
+                            // returns the existing buffer for ones we already hold; it
+                            // also sends open-buffer, so no separate open() call here.
+                            val b = buffer.networkId?.let { client.focusTarget(it, buffer.target) }
+                                ?: buffer.also { client.open(it) }
+                            client.setActive(b)
+                            screen = Screen.Chat(b)
                         },
                         onSettings = { client.loadSettings(); screen = Screen.Settings },
                         onDcc = { client.loadDcc(); screen = Screen.Dcc },
@@ -740,6 +750,8 @@ private fun BufferListScreen(
             client.networks.toMap(),
             client.networkConfigs.toList(),
             client.pins.toMap(),
+            client.contacts.toList(),
+            client.presence.toMap(),
         ) { buildBufferSections(client) }
 
         if (rows.isEmpty()) {
@@ -849,6 +861,12 @@ private fun BufferListBody(
                 ) {
                     Column {
                         section.buffers.forEachIndexed { i, buffer ->
+                            // Friend rows are identity rows synthesized from contacts:
+                            // they carry a presence dot, are tagged by network (they
+                            // span networks), and are NOT closeable/pinnable here (a
+                            // friend buffer is unclosable — closing would just collapse
+                            // it back to this same row).
+                            val isFriendRow = section.network == "♥ Friends"
                             BufferRow(
                                 buffer = buffer,
                                 unread = client.unread[buffer.key] ?: 0,
@@ -856,15 +874,16 @@ private fun BufferListBody(
                                 hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
                                 pinned = client.isPinned(buffer),
                                 notifyAll = client.isNotifyAlways(buffer),
-                                showNetwork = section.network == "★ Pinned",
-                                onTogglePin = if (buffer.isSystem || buffer.isServerBuffer) null else {
+                                showNetwork = section.network == "★ Pinned" || isFriendRow,
+                                online = if (isFriendRow) client.isPresent(buffer.networkId, buffer.target) else null,
+                                onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
                                 onToggleNotify = if (buffer.isChannel) {
                                     { client.setNotifyAlways(buffer, !client.isNotifyAlways(buffer)) }
                                 } else null,
                                 onClick = { onOpen(buffer) },
-                                onClose = if (buffer.isSystem || buffer.isServerBuffer) null else {
+                                onClose = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.execute(buffer, listOf(WireOp("close"))) }
                                 },
                             )
@@ -895,9 +914,39 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     val pinned = client.buffers.filter { client.isPinned(it) }
     if (pinned.isNotEmpty()) out.add(BufferSection("★ Pinned", pinned.sortedBy { it.target.lowercase() }))
 
-    // Pinned buffers live only in the Pinned section — drop them from their
-    // network group so they don't show twice (matches the web client).
-    val byNetwork = client.buffers.filterNot { client.isPinned(it) }.groupBy { it.networkName }
+    // A "Friends" section: one row per contact's primary DM, synthesized from the
+    // contacts store INDEPENDENTLY of whether a buffer is open server-side — per
+    // amiantos, close-state is irrelevant to a friend buffer (the web sidebar is
+    // f(buffers ∪ friend-primary-DMs ∪ …)). Reuse the open buffer if we hold one
+    // (real casing / shared unread key); otherwise synthesize a transient row that
+    // materializes on tap via open-buffer. Friend primary DMs are then hidden from
+    // the per-network lists below (the web's friends.primaryDmKeys) so they don't
+    // show twice.
+    val friendRows = client.contacts.mapNotNull { c ->
+        val p = c.primary ?: return@mapNotNull null
+        val key = "${p.networkId}::${p.nick}"
+        client.buffers.firstOrNull { it.key == key }
+            ?: Buffer(p.networkId, p.nick, client.networkName(p.networkId))
+    }
+    val friendKeys = friendRows.map { it.key }.toSet()
+    if (friendRows.isNotEmpty()) {
+        out.add(
+            BufferSection(
+                "♥ Friends",
+                friendRows.sortedWith(
+                    compareByDescending<Buffer> { client.isPresent(it.networkId, it.target) }
+                        .thenBy { it.target.lowercase() },
+                ),
+            ),
+        )
+    }
+
+    // Pinned + friend-primary buffers live only in their own sections — drop them
+    // from the network group so they don't show twice (matches the web client).
+    val byNetwork = client.buffers
+        .filterNot { client.isPinned(it) }
+        .filterNot { it.key in friendKeys }
+        .groupBy { it.networkName }
     byNetwork.keys
         .sortedWith(compareBy({ client.networkOrder(it) }, { it.lowercase() }))
         .forEach { network ->
@@ -925,6 +974,7 @@ private fun BufferRow(
     pinned: Boolean = false,
     notifyAll: Boolean = false,
     showNetwork: Boolean = false,
+    online: Boolean? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -965,6 +1015,15 @@ private fun BufferRow(
             .padding(16.dp, 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Presence dot for Friends rows: green when present, dim when offline.
+        if (online != null) {
+            Box(
+                Modifier
+                    .padding(end = 10.dp)
+                    .size(9.dp)
+                    .background(if (online) OnlineGreen else TextSecondary.copy(alpha = 0.4f), CircleShape),
+            )
+        }
         Column(Modifier.weight(1f)) {
             Text(
                 buffer.displayName,
