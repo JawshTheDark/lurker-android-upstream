@@ -35,4 +35,18 @@ class CompletionTest {
     fun commandsPrefixMatch() {
         assertEquals(listOf("/join"), Completion.commands("/jo", Completion.VERBS))
     }
+
+    @Test
+    fun channelsPrefixMatchDedupAndSort() {
+        val out = Completion.channels(
+            prefix = "#lur",
+            known = listOf("#lurker-notes", "#lurker", "#lurker", "#other", "#Lurker-secure"),
+        )
+        assertEquals(listOf("#lurker", "#lurker-notes", "#Lurker-secure"), out)
+    }
+
+    @Test
+    fun channelsCaseInsensitivePrefix() {
+        assertEquals(listOf("#Chat"), Completion.channels("#ch", listOf("#Chat", "#dev")))
+    }
 }

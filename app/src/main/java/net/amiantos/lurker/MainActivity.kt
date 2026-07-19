@@ -1354,10 +1354,19 @@ private fun ChatScreen(
                 // Completion: the word under the cursor drives a suggestion strip —
                 // nicks in channels, /commands at line start. No Tab key on mobile.
                 val word = Completion.wordAt(draft.text, draft.selection.start)
-                val suggestions = remember(draft.text, draft.selection.start, client.members[buffer.key]) {
+                val suggestions = remember(
+                    draft.text, draft.selection.start,
+                    client.members[buffer.key], client.buffers.size, client.chanlistRows.size,
+                ) {
                     when {
                         word.text.startsWith("/") && word.start == 0 ->
                             Completion.commands(word.text, Completion.VERBS)
+                        word.text.length >= 2 && (word.text.startsWith("#") || word.text.startsWith("&")) -> {
+                            // Channels you're in first, then anything the /LIST browser pulled in.
+                            val known = client.buffers.filter { it.isChannel }.map { it.target } +
+                                client.chanlistRows.map { it.channel }
+                            Completion.channels(word.text, known).take(12)
+                        }
                         word.text.length >= 1 && !word.text.startsWith("/") -> {
                             val recents = (client.messagesByBuffer[buffer.key] ?: emptyList())
                                 .asReversed().asSequence()
@@ -1371,7 +1380,10 @@ private fun ChatScreen(
                     }
                 }
                 fun applySuggestion(pick: String): TextFieldValue {
-                    val atLineStart = word.start == 0 && !pick.startsWith("/")
+                    // The "nick, " ping form only applies to a nick opening the line —
+                    // not commands or channel names.
+                    val isChannel = pick.startsWith("#") || pick.startsWith("&")
+                    val atLineStart = word.start == 0 && !pick.startsWith("/") && !isChannel
                     val insert = pick + if (atLineStart) ", " else " "
                     val before = draft.text.substring(0, word.start)
                     val after = draft.text.substring((word.start + word.text.length).coerceAtMost(draft.text.length))

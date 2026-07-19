@@ -42,6 +42,20 @@ object Completion {
         return out
     }
 
+    /**
+     * Channel candidates for a "#…" prefix: case-insensitive prefix match over
+     * [known] channel names (open buffers + any /LIST results), deduped,
+     * alphabetical. The prefix includes its leading "#" (or "&", etc.).
+     */
+    fun channels(prefix: String, known: List<String>): List<String> {
+        val p = prefix.lowercase()
+        val seen = HashSet<String>()
+        return known.asSequence()
+            .filter { it.lowercase().startsWith(p) && seen.add(it.lowercase()) }
+            .sortedBy { it.lowercase() }
+            .toList()
+    }
+
     /** Command candidates for a "/verb" prefix (built-ins + any user aliases). */
     fun commands(prefix: String, verbs: List<String>): List<String> {
         val p = prefix.removePrefix("/").lowercase()
