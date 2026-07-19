@@ -1018,7 +1018,8 @@ private fun ChatScreen(
     // Prefix the composer with "nick: " — the shared reply seam for the
     // long-press action sheet and the swipe-to-reply gesture.
     fun replyTo(m: Msg) {
-        val t = "${m.nick}: " + draft.text
+        // "nick, " — the same ping form nick-completion uses at line start, not ":".
+        val t = "${m.nick}, " + draft.text
         draft = TextFieldValue(t, TextRange(t.length))
         client.setDraftLocal(buffer, t)
     }

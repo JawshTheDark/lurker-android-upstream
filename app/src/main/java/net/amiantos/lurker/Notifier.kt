@@ -57,11 +57,14 @@ object Notifier {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val title = if (e.isDm) e.nick else "${e.nick} · ${e.target}"
+        // Strip mIRC bold/color/etc. control codes — the notification is plain text,
+        // so raw codes would show as literal "3,01" garbage.
+        val body = Mirc.strip(e.text)
         val notif = NotificationCompat.Builder(context, if (e.isDm) CHANNEL_DMS else CHANNEL_MENTIONS)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(title)
-            .setContentText(e.text.take(200))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(e.text.take(400)))
+            .setContentText(body.take(200))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(400)))
             .setAutoCancel(true)
             .setContentIntent(pi)
             .build()
