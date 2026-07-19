@@ -95,6 +95,26 @@ data class Contact(
 /** A server-synced custom slash alias: /name expands to expansion with $1..$9 params. */
 data class AliasEntry(val id: Int, val name: String, val expansion: String)
 
+/**
+ * An irssi-style ignore rule (issue #301). AND-ed dimensions: [mask] (who),
+ * [channels] (where), [pattern] (what text), [levels] (which event types + the
+ * special modifiers NOHIGHLIGHT/NONOTIFY/NOUNREAD/ALL). [isExcept] inverts it
+ * (an un-ignore). [networkId] null = a global rule (every network).
+ */
+data class IgnoreRule(
+    val id: Long,
+    val networkId: Int?,
+    val mask: String?,
+    val channels: List<String>?,
+    val pattern: String?,
+    val patternKind: String,
+    val levels: List<String>,
+    val isExcept: Boolean,
+) {
+    val who: String get() = mask?.takeIf { it.isNotBlank() } ?: "anyone"
+    val levelsLabel: String get() = if (levels.isEmpty()) "all" else levels.joinToString(", ") { it.lowercase() }
+}
+
 /** A row in the /LIST channel browser. */
 data class ChannelListing(val channel: String, val users: Int, val topic: String)
 

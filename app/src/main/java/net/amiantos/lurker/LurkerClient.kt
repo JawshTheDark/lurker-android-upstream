@@ -73,6 +73,9 @@ class LurkerClient {
     /** Server-synced custom aliases (name -> expansion). Fork-only feature. */
     val aliases = mutableStateListOf<AliasEntry>()
 
+    /** Server-synced ignore rules (global + per-network), each carrying its scope. */
+    val ignores = mutableStateListOf<IgnoreRule>()
+
     /**
      * True once a snapshot arrives from a server that supports the fork's
      * extended features (custom aliases, DCC send/chat, fserve). Inferred from
@@ -293,6 +296,7 @@ class LurkerClient {
             drafts.clear()
             inputHistory.clear()
             aliases.clear()
+            ignores.clear()
             serverExtended = false
             bookmarkIds.clear()
             contacts.clear()
@@ -574,6 +578,12 @@ class LurkerClient {
                     serverExtended = true
                     applyAliases(frame.optJSONArray("aliases"))
                 }
+                if (frame.has("globalIgnores")) applyIgnoreScope(null, frame.optJSONArray("globalIgnores"))
+            }
+
+            "ignore-list-updated" -> {
+                val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
+                applyIgnoreScope(networkId, frame.optJSONArray("masks"))
             }
 
             "backlog" -> {
@@ -1787,8 +1797,61 @@ class LurkerClient {
     }
 
     /** Add a simple ALL-level ignore for [mask] (bare-mask rule the server accepts). */
-    fun addIgnore(networkId: Int, mask: String) {
-        ws?.send(JSONObject().put("type", "add-ignore").put("networkId", networkId).put("mask", mask).toString())
+    /** Add an ignore rule. [networkId] null = global (every network); empty
+     *  [levels] means ALL. e.g. levels=["NOHIGHLIGHT"] ignores only a sender's
+     *  highlights without hiding their messages. */
+    fun addIgnore(
+        networkId: Int?,
+        mask: String?,
+        levels: List<String> = listOf("ALL"),
+        isExcept: Boolean = false,
+        pattern: String? = null,
+        channels: List<String>? = null,
+    ) {
+        val rule = JSONObject()
+            .put("mask", mask ?: JSONObject.NULL)
+            .put("channels", channels?.let { JSONArray(it) } ?: JSONObject.NULL)
+            .put("pattern", pattern ?: JSONObject.NULL)
+            .put("patternKind", "substr")
+            .put("levels", JSONArray(levels))
+            .put("isExcept", isExcept)
+        ws?.send(
+            JSONObject().put("type", "add-ignore")
+                .put("networkId", networkId ?: JSONObject.NULL)
+                .put("rule", rule)
+                .toString(),
+        )
+    }
+
+    fun removeIgnore(networkId: Int?, id: Long) {
+        ws?.send(
+            JSONObject().put("type", "remove-ignore")
+                .put("networkId", networkId ?: JSONObject.NULL)
+                .put("id", id)
+                .toString(),
+        )
+    }
+
+    private fun applyIgnoreScope(networkId: Int?, arr: JSONArray?) {
+        ignores.removeAll { it.networkId == networkId }
+        if (arr == null) return
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val channels = o.optJSONArray("channels")?.let { a -> (0 until a.length()).map { a.optString(it) } }
+            val levels = o.optJSONArray("levels")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList()
+            ignores.add(
+                IgnoreRule(
+                    id = o.optLong("id"),
+                    networkId = networkId,
+                    mask = if (o.isNull("mask")) null else o.optString("mask").takeIf { it.isNotEmpty() },
+                    channels = channels,
+                    pattern = if (o.isNull("pattern")) null else o.optString("pattern").takeIf { it.isNotEmpty() },
+                    patternKind = o.optString("patternKind").ifEmpty { "substr" },
+                    levels = levels,
+                    isExcept = o.optBoolean("isExcept", false),
+                ),
+            )
+        }
     }
 
     /** Kick a fresh /LIST refresh on a network and load its cached rows. */

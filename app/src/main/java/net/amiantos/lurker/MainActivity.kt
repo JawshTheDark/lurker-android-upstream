@@ -57,6 +57,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -73,6 +74,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -203,6 +205,7 @@ private sealed interface Screen {
     data object Networks : Screen
     data object Search : Screen
     data object Friends : Screen
+    data object Ignores : Screen
     data object ChannelList : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
@@ -315,6 +318,7 @@ class MainActivity : FragmentActivity() {
                             onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
                             onSearch = { screen = Screen.Search },
                             onFriends = { screen = Screen.Friends },
+                            onIgnores = { screen = Screen.Ignores },
                             onBrowse = { screen = Screen.ChannelList },
                             onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                             showList = true,
@@ -333,7 +337,7 @@ class MainActivity : FragmentActivity() {
                             onSelect = onSelectBuffer,
                             onDeselect = { client.setActive(null); screen = Screen.Buffers },
                             onSettings = {}, onDcc = {}, onNetworks = {},
-                            onSearch = {}, onFriends = {}, onBrowse = {}, onSignOut = {},
+                            onSearch = {}, onFriends = {}, onIgnores = {}, onBrowse = {}, onSignOut = {},
                             showList = false,
                             showRoster = true,
                         )
@@ -353,6 +357,7 @@ class MainActivity : FragmentActivity() {
                         onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
                         onSearch = { screen = Screen.Search },
                         onFriends = { screen = Screen.Friends },
+                        onIgnores = { screen = Screen.Ignores },
                         onBrowse = { screen = Screen.ChannelList },
                         onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                     )
@@ -399,6 +404,7 @@ class MainActivity : FragmentActivity() {
                         },
                         onBack = { screen = Screen.Buffers },
                     )
+                    Screen.Ignores -> IgnoresScreen(client) { screen = Screen.Buffers }
                     Screen.ChannelList -> ChannelListScreen(
                         client = client,
                         onJoin = { networkId, chan ->
@@ -545,6 +551,7 @@ private fun TabletHome(
     onNetworks: () -> Unit,
     onSearch: () -> Unit,
     onFriends: () -> Unit,
+    onIgnores: () -> Unit,
     onBrowse: () -> Unit,
     onSignOut: () -> Unit,
     // Three-pane keeps the buffer-list rail; two-pane drops it (the chat pairs
@@ -578,6 +585,7 @@ private fun TabletHome(
                     onNetworks = onNetworks,
                     onSearch = onSearch,
                     onFriends = onFriends,
+                    onIgnores = onIgnores,
                     onBrowse = onBrowse,
                     onSignOut = onSignOut,
                 )
@@ -704,6 +712,7 @@ private fun BufferListScreen(
     onNetworks: () -> Unit,
     onSearch: () -> Unit,
     onFriends: () -> Unit,
+    onIgnores: () -> Unit,
     onBrowse: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -770,6 +779,7 @@ private fun BufferListScreen(
                         DropdownMenuItem(text = { Text("Browse channels (/LIST)") }, onClick = { menuOpen = false; onBrowse() })
                         DropdownMenuItem(text = { Text("Mark all read") }, onClick = { menuOpen = false; client.markAllRead() })
                         DropdownMenuItem(text = { Text("Friends") }, onClick = { menuOpen = false; onFriends() })
+                        DropdownMenuItem(text = { Text("Ignore list") }, onClick = { menuOpen = false; onIgnores() })
                         DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
                         DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
@@ -1841,7 +1851,14 @@ private fun MemberActions(
                 onDone()
             }
         }
-        SheetAction("Ignore", danger = true) { client.addIgnore(networkId, member.banMask); onDone() }
+        // Mute this nick's mentions of you without hiding their messages — handy
+        // for a bot that pings your name. A global NOHIGHLIGHT rule on their mask.
+        SheetAction("Ignore highlights") {
+            client.addIgnore(null, member.banMask, levels = listOf("NOHIGHLIGHT")); onDone()
+        }
+        SheetAction("Ignore (everything)", danger = true) {
+            client.addIgnore(networkId, member.banMask, levels = listOf("ALL")); onDone()
+        }
         // FORK-ONLY (outgoing DCC): only when the server supports it.
         if (client.serverExtended) {
             SheetAction("DCC: send a file…") { onPickFileFor(nick) }
@@ -3827,6 +3844,122 @@ private fun ChannelListScreen(
 }
 
 // ---- DCC -----------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IgnoresScreen(client: LurkerClient, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    var showAdd by remember { mutableStateOf(false) }
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = { TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) } },
+                title = { Text("Ignore list", fontWeight = FontWeight.SemiBold) },
+                actions = { TextButton(onClick = { showAdd = true }) { Text("Add", color = AccentBlue) } },
+            )
+        },
+    ) { padding ->
+        val rules = remember(client.ignores.toList()) {
+            client.ignores.sortedWith(compareBy({ it.networkId ?: -1 }, { it.who.lowercase() }))
+        }
+        LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+            if (rules.isEmpty()) {
+                item {
+                    Text(
+                        "Nobody ignored. Tap Add, or long-press a nick in a channel and choose “Ignore highlights.”",
+                        color = TextSecondary, modifier = Modifier.padding(24.dp),
+                    )
+                }
+            }
+            items(rules.size) { i ->
+                val r = rules[i]
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(r.who, fontSize = 16.sp, color = TextPrimary)
+                        val scope = if (r.networkId == null) "global" else client.networks[r.networkId]?.name ?: "net ${r.networkId}"
+                        val exc = if (r.isExcept) "except " else ""
+                        Text("$exc${r.levelsLabel} · $scope", fontSize = 13.sp, color = TextSecondary)
+                    }
+                    TextButton(onClick = { client.removeIgnore(r.networkId, r.id) }) {
+                        Text("Remove", color = AlertRed, fontSize = 13.sp)
+                    }
+                }
+                HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 20.dp))
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+    if (showAdd) {
+        AddIgnoreDialog(onDismiss = { showAdd = false }) { mask, levels ->
+            client.addIgnore(null, mask, levels = levels)
+            showAdd = false
+        }
+    }
+}
+
+/** Independent level checkboxes — pick exactly what to ignore (e.g. just
+ *  highlights). Unlike the web UI, "Everything" is optional, not forced-on. */
+private val IGNORE_LEVELS = listOf(
+    "NOHIGHLIGHT" to "Highlights (mentions of your nick)",
+    "NONOTIFY" to "Push notifications",
+    "ALL" to "Everything (all messages & events)",
+    "PUBLIC" to "Channel messages",
+    "MSGS" to "Direct messages",
+    "NOTICES" to "Notices",
+    "ACTIONS" to "Actions (/me)",
+    "JOINS" to "Joins",
+    "PARTS" to "Parts",
+    "QUITS" to "Quits",
+    "NICKS" to "Nick changes",
+)
+
+@Composable
+private fun AddIgnoreDialog(onDismiss: () -> Unit, onAdd: (String, List<String>) -> Unit) {
+    var mask by remember { mutableStateOf("") }
+    val selected = remember { mutableStateListOf<String>() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceRaised,
+        title = { Text("Ignore rule", color = TextPrimary) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    mask, { mask = it },
+                    label = { Text("Nick or mask (e.g. botnick or *!*@host)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
+                Text("Ignore which:", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                    IGNORE_LEVELS.forEach { (token, label) ->
+                        val on = token in selected
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable { if (on) selected.remove(token) else selected.add(token) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = on, onCheckedChange = { if (on) selected.remove(token) else selected.add(token) })
+                            Text(label, color = TextPrimary, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = mask.isNotBlank() && selected.isNotEmpty(),
+                onClick = { onAdd(mask.trim(), selected.toList()) },
+            ) { Text("Add", color = AccentBlue, fontWeight = FontWeight.SemiBold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) } },
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
