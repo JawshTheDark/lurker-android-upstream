@@ -37,6 +37,14 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!-- Opt-in background liveness anchor (Prefs.backgroundConnect). Holds no
+             socket of its own; keeps the process alive so the shared client's
+             WebSocket stays connected for background notifications. -->
+        <service
+            android:name=".LurkerConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>
