@@ -43,6 +43,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("inlineMedia", true)
         set(value) = sp.edit { putBoolean("inlineMedia", value) }
 
+    /** Device-local sp added to the synced chat font size (0 = server default). */
+    var chatTextScale: Int
+        get() = sp.getInt("chatTextScale", 0)
+        set(value) = sp.edit { putInt("chatTextScale", value) }
+
     /** Require a biometric / device-credential unlock to open the app (default off). */
     var biometricLock: Boolean
         get() = sp.getBoolean("biometricLock", false)

@@ -235,6 +235,7 @@ class MainActivity : FragmentActivity() {
         locked = prefs.biometricLock && !(application as LurkerApp).unlocked
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
+        Ui.chatTextScale = prefs.chatTextScale
         client.start(prefs)
         Notifier.ensureChannels(this)
         // Notify only while backgrounded; posts from the WS thread (thread-safe).
@@ -275,24 +276,26 @@ class MainActivity : FragmentActivity() {
                 }
 
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    // EXPANDED width → the buffer list and chat share the screen in
-                    // TabletHome; only leaf destinations (Settings, Search, …) take
-                    // over full-screen. Below the gate, the phone flow is unchanged.
-                    val expanded = maxWidth >= 840.dp
-                    val roomForRoster = maxWidth >= 1100.dp
+                    // Width tiers. THREE-pane (>=1100dp, e.g. landscape tablet):
+                    // list | chat | roster, all persistent. TWO-pane (840–1100dp,
+                    // e.g. tablet portrait): chat | roster — the channel list is
+                    // the full-screen master reached with Back (like the phone), so
+                    // the chat pairs with the nicklist, not the list. Below 840:
+                    // the unchanged phone flow.
+                    val threePane = maxWidth >= 1100.dp
+                    val twoPane = maxWidth >= 840.dp && !threePane
                     val active = screen
-                    if (expanded && (active == Screen.Buffers || active is Screen.Chat)) {
+                    val onSelectBuffer: (Buffer) -> Unit = { buffer ->
+                        client.open(buffer); client.setActive(buffer); screen = Screen.Chat(buffer)
+                    }
+                    if (threePane && (active == Screen.Buffers || active is Screen.Chat)) {
                         TabletHome(
                             client = client,
                             selectedBuffer = (active as? Screen.Chat)?.buffer,
                             sharedUri = sharedUri,
                             onShareConsumed = { sharedUri = null },
                             sharePending = sharedUri != null,
-                            onSelect = { buffer ->
-                                client.open(buffer)
-                                client.setActive(buffer)
-                                screen = Screen.Chat(buffer)
-                            },
+                            onSelect = onSelectBuffer,
                             onDeselect = { client.setActive(null); screen = Screen.Buffers },
                             onSettings = { client.loadSettings(); screen = Screen.Settings },
                             onDcc = { client.loadDcc(); screen = Screen.Dcc },
@@ -301,7 +304,25 @@ class MainActivity : FragmentActivity() {
                             onFriends = { screen = Screen.Friends },
                             onBrowse = { screen = Screen.ChannelList },
                             onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
-                            showRoster = roomForRoster,
+                            showList = true,
+                            showRoster = true,
+                        )
+                        return@BoxWithConstraints
+                    }
+                    if (twoPane && active is Screen.Chat) {
+                        // Chat + nicklist; Back drops the list back into view.
+                        TabletHome(
+                            client = client,
+                            selectedBuffer = active.buffer,
+                            sharedUri = sharedUri,
+                            onShareConsumed = { sharedUri = null },
+                            sharePending = sharedUri != null,
+                            onSelect = onSelectBuffer,
+                            onDeselect = { client.setActive(null); screen = Screen.Buffers },
+                            onSettings = {}, onDcc = {}, onNetworks = {},
+                            onSearch = {}, onFriends = {}, onBrowse = {}, onSignOut = {},
+                            showList = false,
+                            showRoster = true,
                         )
                         return@BoxWithConstraints
                     }
@@ -484,8 +505,9 @@ private fun TabletHome(
     onFriends: () -> Unit,
     onBrowse: () -> Unit,
     onSignOut: () -> Unit,
-    // Below ~1100dp (e.g. tablet portrait) there isn't room for a third column,
-    // so the roster collapses back to the modal sheet inside ChatScreen.
+    // Three-pane keeps the buffer-list rail; two-pane drops it (the chat pairs
+    // with the roster and Back returns to the full-screen list).
+    showList: Boolean,
     showRoster: Boolean,
 ) {
     val context = LocalContext.current
@@ -502,22 +524,24 @@ private fun TabletHome(
         }
     }
     Row(Modifier.fillMaxSize().background(CanvasBlack)) {
-        // Left rail — the full buffer list, overflow menu and all.
-        Box(Modifier.width(340.dp).fillMaxHeight()) {
-            BufferListScreen(
-                client = client,
-                sharePending = sharePending,
-                onOpen = onSelect,
-                onSettings = onSettings,
-                onDcc = onDcc,
-                onNetworks = onNetworks,
-                onSearch = onSearch,
-                onFriends = onFriends,
-                onBrowse = onBrowse,
-                onSignOut = onSignOut,
-            )
+        // Left rail (three-pane only) — the full buffer list, overflow menu and all.
+        if (showList) {
+            Box(Modifier.width(340.dp).fillMaxHeight()) {
+                BufferListScreen(
+                    client = client,
+                    sharePending = sharePending,
+                    onOpen = onSelect,
+                    onSettings = onSettings,
+                    onDcc = onDcc,
+                    onNetworks = onNetworks,
+                    onSearch = onSearch,
+                    onFriends = onFriends,
+                    onBrowse = onBrowse,
+                    onSignOut = onSignOut,
+                )
+            }
+            VerticalDivider(color = GlassBorder, thickness = 0.5.dp)
         }
-        VerticalDivider(color = GlassBorder, thickness = 0.5.dp)
         // Middle — the selected conversation.
         Box(Modifier.weight(1f).fillMaxHeight()) {
             if (selectedBuffer != null) {
@@ -528,7 +552,9 @@ private fun TabletHome(
                     onShareConsumed = onShareConsumed,
                     onBack = onDeselect,
                     onOpenBuffer = onSelect,
-                    embedded = true,
+                    // Three-pane: the rail is the persistent nav, so no back arrow.
+                    // Two-pane: show the back arrow (Back returns to the list).
+                    embedded = showList,
                     // No room for a roster column → keep the modal-sheet button.
                     showMembersButton = !showRoster,
                 )
@@ -1182,8 +1208,9 @@ private fun ChatScreen(
         // where the message list is sparse; messages layer on top at zIndex 1.
         AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
         // Chat text follows the synced look.font.size.mobile setting (web px
-        // ~ sp); +2 keeps the historical default (14 -> 16sp).
-        val baseSize = client.settingInt("look.font.size.mobile", 14) + 2
+        // ~ sp); +2 keeps the historical default (14 -> 16sp). Ui.chatTextScale
+        // is the device-local bump (tablets read tiny at the mobile default).
+        val baseSize = (client.settingInt("look.font.size.mobile", 14) + 2 + Ui.chatTextScale).coerceIn(11, 30)
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 1f),
@@ -2832,6 +2859,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { Spacer(Modifier.height(8.dp)) }
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
+                item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
                 item { BackgroundConnectCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
@@ -3019,6 +3047,53 @@ private fun BiometricLockCard(prefs: Prefs) {
         subtitle = "Ask for fingerprint, face, or device PIN each time the app opens.",
         checked = on,
     ) { on = it; prefs.biometricLock = it }
+}
+
+@Composable
+private fun ChatTextSizeCard(prefs: Prefs) {
+    var scale by remember { mutableStateOf(Ui.chatTextScale) }
+    fun set(v: Int) { scale = v.coerceIn(-3, 14); Ui.chatTextScale = scale; prefs.chatTextScale = scale }
+    val preview = (16 + scale).coerceIn(11, 30)
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Message text size", fontSize = 17.sp)
+                Text(
+                    if (scale == 0) "Default · great to bump up on a tablet" else "${if (scale > 0) "+" else ""}$scale from default",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(36.dp).clip(CircleShape).clickable { set(scale - 1) }
+                        .semantics { contentDescription = "Smaller text"; role = Role.Button },
+                    contentAlignment = Alignment.Center,
+                ) { Text("A", color = AccentBlue, fontSize = 15.sp) }
+                Text(
+                    "Aa",
+                    fontSize = preview.sp,
+                    color = TextPrimary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(48.dp),
+                )
+                Box(
+                    Modifier.size(36.dp).clip(CircleShape).clickable { set(scale + 1) }
+                        .semantics { contentDescription = "Larger text"; role = Role.Button },
+                    contentAlignment = Alignment.Center,
+                ) { Text("A", color = AccentBlue, fontSize = 22.sp) }
+            }
+        }
+    }
 }
 
 @Composable
