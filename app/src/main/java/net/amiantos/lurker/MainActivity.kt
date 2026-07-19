@@ -866,7 +866,7 @@ private fun BufferListBody(
                             // span networks), and are NOT closeable/pinnable here (a
                             // friend buffer is unclosable — closing would just collapse
                             // it back to this same row).
-                            val isFriendRow = section.network == "♥ Friends"
+                            val isFriendRow = section.network == "Friends"
                             BufferRow(
                                 buffer = buffer,
                                 unread = client.unread[buffer.key] ?: 0,
@@ -933,7 +933,7 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     if (friendRows.isNotEmpty()) {
         out.add(
             BufferSection(
-                "♥ Friends",
+                "Friends",
                 friendRows.sortedWith(
                     compareByDescending<Buffer> { client.isPresent(it.networkId, it.target) }
                         .thenBy { it.target.lowercase() },
