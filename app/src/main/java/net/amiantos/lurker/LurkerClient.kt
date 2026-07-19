@@ -803,7 +803,7 @@ class LurkerClient {
                 val existing = messagesByBuffer[key] ?: emptyList()
                 val known = existing.mapNotNull { m -> m.id.takeIf { it > 0 } }.toHashSet()
                 val older = parsed.filter { it.id <= 0 || it.id !in known }
-                if (older.isNotEmpty()) messagesByBuffer[key] = older + existing
+                if (older.isNotEmpty()) messagesByBuffer[key] = ensureOrdered(older + existing)
             }
 
             "error" -> status = frame.optString("text")
@@ -1094,9 +1094,12 @@ class LurkerClient {
         }
         val ids = existing.mapNotNull { if (it.id > 0) it.id else null }.toHashSet()
         val add = newMsgs.filter { it.id <= 0 || ids.add(it.id) }
-        if (add.isNotEmpty()) messagesByBuffer[key] = existing + add
-        return add.isNotEmpty()
+        if (add.isEmpty()) return false
+        messagesByBuffer[key] = ensureOrdered(existing + add)
+        return true
     }
+
+    private fun ensureOrdered(msgs: List<Msg>): List<Msg> = orderMessagesById(msgs)
 
     // ---- Unread accounting ------------------------------------------------
 
@@ -2027,3 +2030,22 @@ internal fun shouldNotify(
     foreground: Boolean,
 ): Boolean =
     notify && !foreground && !self && !system && hasId && !isActiveBuffer
+
+/**
+ * Order chat rows by server id. Out-of-order live delivery (two sources racing —
+ * e.g. an MCP post + an app send — or a delayed E2E decrypt) would otherwise
+ * strand a lower-id message at the tail. Fast-paths the already-sorted common
+ * case (no allocation). When a reorder IS needed, client-injected rows (id<=0:
+ * local notices, whois blocks, E2E status) stay anchored right after the real
+ * message they were injected below, rather than jumping to the end.
+ */
+internal fun orderMessagesById(msgs: List<Msg>): List<Msg> {
+    var last = 0L
+    for (m in msgs) if (m.id > 0) { if (m.id < last) { last = -1; break }; last = m.id }
+    if (last != -1L) return msgs // already in order
+    var anchor = 0L
+    return msgs.map { m ->
+        val sortKey = if (m.id > 0) { anchor = m.id; m.id * 2 } else anchor * 2 + 1
+        sortKey to m
+    }.sortedBy { it.first }.map { it.second }
+}
