@@ -158,6 +158,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.ImageLoader
+import coil.imageLoader
 import coil.compose.AsyncImage
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
@@ -190,7 +191,10 @@ private sealed interface Screen {
 }
 
 class MainActivity : ComponentActivity() {
-    private val client = LurkerClient()
+    // Process-scoped: the socket + buffer state outlive Activity recreation
+    // (rotation, the tablet/phone layout switch) and are shared with the
+    // background service, instead of a fresh client per Activity.
+    private val client: LurkerClient get() = (application as LurkerApp).client
 
     /** A file arriving via the system share sheet, waiting for a buffer pick. */
     private var sharedUri by mutableStateOf<Uri?>(null)
@@ -1906,18 +1910,13 @@ private val CHANNEL_RE = Regex("""#[^\s,]+""")
 private val MEDIA_EXTS = VIDEO_EXTS + AUDIO_EXTS
 
 /** One shared animated image loader for all inline embeds (GIF/WebP capable). */
-private var embedLoader: coil.ImageLoader? = null
 
 @Composable
 private fun rememberEmbedLoader(): coil.ImageLoader {
+    // The app-wide loader (LurkerApp.newImageLoader) — one shared 256 MB disk
+    // cache so inline media survives scrolls, buffer switches, and relaunches.
     val context = LocalContext.current
-    return remember {
-        embedLoader ?: coil.ImageLoader.Builder(context)
-            .components { add(coil.decode.ImageDecoderDecoder.Factory()) }
-            .crossfade(true)
-            .build()
-            .also { embedLoader = it }
-    }
+    return remember { context.imageLoader }
 }
 
 /**
@@ -2143,11 +2142,7 @@ private fun MediaViewerDialog(url: String, onClose: () -> Unit) {
                 .background(Color.Black.copy(alpha = 0.96f)),
         ) {
             if (isImage) {
-                val loader = remember {
-                    ImageLoader.Builder(context)
-                        .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP
-                        .build()
-                }
+                val loader = context.imageLoader // shared app-wide disk cache
                 var scale by remember { mutableStateOf(1f) }
                 var offset by remember { mutableStateOf(Offset.Zero) }
                 AsyncImage(

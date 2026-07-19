@@ -104,6 +104,9 @@ class LurkerClient {
     /** True while the Activity is in the foreground (badge is enough; no notif). */
     private var appForeground = true
 
+    /** Guards [start] so a recreated Activity doesn't cycle the socket. */
+    private var started = false
+
     /** Set by the app: invoked for a notify-worthy message while backgrounded. */
     var notificationSink: ((NotifiableEvent) -> Unit)? = null
 
@@ -208,6 +211,10 @@ class LurkerClient {
      * without a sign-in screen. Called once from the Activity.
      */
     fun start(prefs: Prefs) {
+        // Idempotent: the client is process-scoped now, so a recreated Activity
+        // (rotation, layout switch) calls start() again — don't cycle the socket.
+        if (started) { this.prefs = prefs; return }
+        started = true
         this.prefs = prefs
         if (prefs.hasSession) {
             token = prefs.token
@@ -259,6 +266,7 @@ class LurkerClient {
     /** Tear down the session: close the socket, forget the token, reset state. */
     fun signOut() {
         intentionalClose = true
+        started = false
         ws?.close(1000, "sign out")
         ws = null
         io.execute { revokeSession() }

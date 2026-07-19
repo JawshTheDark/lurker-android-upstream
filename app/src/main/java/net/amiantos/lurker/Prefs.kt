@@ -43,6 +43,18 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("inlineMedia", true)
         set(value) = sp.edit { putBoolean("inlineMedia", value) }
 
+    /** Require a biometric / device-credential unlock to open the app (default off). */
+    var biometricLock: Boolean
+        get() = sp.getBoolean("biometricLock", false)
+        set(value) = sp.edit { putBoolean("biometricLock", value) }
+
+    /** Hold the connection open in the background via a foreground service so
+     *  highlight/DM notifications keep arriving. Opt-in — off = no persistent
+     *  notification, rely on ?since= resume on return (default off). */
+    var backgroundConnect: Boolean
+        get() = sp.getBoolean("backgroundConnect", false)
+        set(value) = sp.edit { putBoolean("backgroundConnect", value) }
+
     /** Persist a fresh session after a successful token mint. */
     fun saveSession(server: String, username: String, token: String) {
         sp.edit {
