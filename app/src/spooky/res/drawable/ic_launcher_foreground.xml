@@ -1,0 +1,17 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Green "X" (X-Files) for the public Spooky build. -->
+    <path
+        android:strokeColor="#8BFFAE"
+        android:strokeWidth="15"
+        android:strokeLineCap="round"
+        android:pathData="M35,35 L73,73" />
+    <path
+        android:strokeColor="#8BFFAE"
+        android:strokeWidth="15"
+        android:strokeLineCap="round"
+        android:pathData="M73,35 L35,73" />
+</vector>

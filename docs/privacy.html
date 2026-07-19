@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Spooky for Lurker</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1c1c1e; --muted: #6b6b70;
+    --card: #f6f6f8; --border: #e2e2e6; --link: #0a63c9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0d0f; --fg: #e9e9ec; --muted: #9a9aa0;
+      --card: #17171a; --border: #2a2a2e; --link: #5aa9ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--fg);
+    max-width: 46rem; margin-inline: auto;
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
+  .meta { color: var(--muted); font-size: .9rem; margin-bottom: 1.5rem; }
+  a { color: var(--link); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1rem 1.25rem; margin: 1.25rem 0;
+  }
+  ul { padding-left: 1.25rem; }
+  li { margin: .35rem 0; }
+  footer { color: var(--muted); font-size: .85rem; margin-top: 3rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Spooky for Lurker (Android) &middot; package <code>chat.irc.lurker</code><br>
+  Last updated: July 18, 2026</p>
+
+  <div class="card">
+    <strong>The short version:</strong> This app collects no data for the developer.
+    It only talks to the IRC bouncer server <em>you</em> choose to connect to. There
+    are no ads, no analytics, and no tracking of any kind.
+  </div>
+
+  <h2>Who this is from</h2>
+  <p>
+    Spooky for Lurker is an independent, open-source IRC bouncer client for
+    Android, compatible with <a href="https://lurker.chat">Lurker</a> servers — both
+    the hosted service at lurker.chat and self-hosted instances. It is a community
+    build and is <strong>not affiliated with, endorsed by, or operated by</strong> the
+    official Lurker project or its maintainer. The app is published by an independent
+    developer and its source is available at
+    <a href="https://github.com/JawshTheDark/lurker-android-upstream">github.com/JawshTheDark/lurker-android-upstream</a>.
+  </p>
+
+  <h2>What the app collects</h2>
+  <p>
+    <strong>Nothing is sent to the developer.</strong> The developer of this app
+    operates no servers, receives no data from the app, and has no ability to see
+    your messages, credentials, or activity. The app contains no analytics SDKs, no
+    advertising, and no third-party trackers.
+  </p>
+
+  <h2>Data stored on your device</h2>
+  <p>To function, the app stores the following locally on your device only:</p>
+  <ul>
+    <li>The address of the Lurker server you connect to</li>
+    <li>An authentication token, so you stay signed in</li>
+    <li>Your app settings and preferences</li>
+    <li>Recently received messages and cached media, so conversations display</li>
+  </ul>
+  <p>
+    This data never leaves your device except as part of your connection to your
+    chosen server (below). Signing out clears your token; uninstalling the app removes
+    all of it.
+  </p>
+
+  <h2>Data sent to the server you connect to</h2>
+  <p>
+    When you connect, the app transmits your login credentials or token, the messages
+    you send, and any files you choose to upload — <strong>only to the server you
+    entered</strong> — over an encrypted connection (HTTPS / WSS). The app sends this
+    data nowhere else.
+  </p>
+  <p>
+    How that server handles your data is governed by <em>that server operator's</em>
+    privacy policy, not this one:
+  </p>
+  <ul>
+    <li>If you use the hosted service at lurker.chat, see
+      <a href="https://lurker.chat/privacy">lurker.chat/privacy</a>.</li>
+    <li>If you connect to a self-hosted server, contact that server's operator.</li>
+  </ul>
+
+  <h2>Permissions</h2>
+  <ul>
+    <li><strong>Internet</strong> — to connect to your Lurker server.</li>
+    <li><strong>Files / media you select</strong> — only the specific files you
+      explicitly choose to share or upload are accessed.</li>
+  </ul>
+
+  <h2>Data sharing and sale</h2>
+  <p>The app shares no data with third parties and sells no data. There is no data for
+  the developer to share or sell.</p>
+
+  <h2>Children</h2>
+  <p>This app is not directed at children under 13 and does not knowingly collect data
+  from them.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>Any updates to this policy will be posted on this page with a revised date above.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or the app can be raised at
+    <a href="https://github.com/JawshTheDark/lurker-android-upstream/issues">the project's issue tracker</a>.</p>
+
+  <footer>
+    Spooky for Lurker is a community client and is not the official Lurker app.
+    "Lurker" and related marks belong to their respective owner.
+  </footer>
+</body>
+</html>

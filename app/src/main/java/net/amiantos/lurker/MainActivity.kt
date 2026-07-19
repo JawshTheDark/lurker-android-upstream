@@ -1376,10 +1376,13 @@ private fun MemberActions(
         }
         SheetAction(if (client.nickNote(networkId, nick) != null) "Edit note" else "Add note") { editNote = true }
         SheetAction("Ignore", danger = true) { client.addIgnore(networkId, member.banMask); onDone() }
-        SheetAction("DCC: send a file…") { onPickFileFor(nick) }
-        SheetAction("DCC: start a chat") {
-            client.dccChat(networkId, nick, open = true)
-            onOpenBuffer(client.focusTarget(networkId, "=$nick"))
+        // FORK-ONLY (outgoing DCC): only when the server supports it.
+        if (client.serverExtended) {
+            SheetAction("DCC: send a file…") { onPickFileFor(nick) }
+            SheetAction("DCC: start a chat") {
+                client.dccChat(networkId, nick, open = true)
+                onOpenBuffer(client.focusTarget(networkId, "=$nick"))
+            }
         }
         if (canModerate) {
             HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 6.dp))
@@ -2374,7 +2377,8 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { Spacer(Modifier.height(8.dp)) }
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
-                item { AliasesCard(client) } // FORK-ONLY (stripped from public build)
+                // FORK-ONLY: only shown when the connected server supports it.
+                if (client.serverExtended) item { AliasesCard(client) }
                 items(orderedCategories.size) { i ->
                     val cat = orderedCategories[i]
                     val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
@@ -3188,7 +3192,8 @@ private fun DccScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBa
             client.dccError?.let { err ->
                 item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
             }
-            item { DccStartCard(client, onOpenBuffer) }
+            // FORK-ONLY (outgoing DCC): receiving transfers still list below.
+            if (client.serverExtended) item { DccStartCard(client, onOpenBuffer) }
             if (transfers.isEmpty()) {
                 item { Text("No transfers.", Modifier.padding(16.dp), color = TextSecondary) }
             }

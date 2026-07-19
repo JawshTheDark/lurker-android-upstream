@@ -72,6 +72,16 @@ class LurkerClient {
     /** Server-synced custom aliases (name -> expansion). Fork-only feature. */
     val aliases = mutableStateListOf<AliasEntry>()
 
+    /**
+     * True once a snapshot arrives from a server that supports the fork's
+     * extended features (custom aliases, DCC send/chat, fserve). Inferred from
+     * the presence of the fork-only `aliases` field — vanilla Lurker never sends
+     * it. Gates the fork-only UI at runtime so one build works against any server:
+     * the surfaces stay hidden on stock/hosted Lurker and light up on the fork.
+     */
+    var serverExtended by mutableStateOf(false)
+        private set
+
     /** networkId -> pinned buffer targets, in user order. */
     val pins = mutableStateMapOf<Int, List<String>>()
 
@@ -259,6 +269,7 @@ class LurkerClient {
             drafts.clear()
             inputHistory.clear()
             aliases.clear()
+            serverExtended = false
             pins.clear()
             nickNotes.clear()
             notifyAlways.clear()
@@ -499,7 +510,10 @@ class LurkerClient {
             "snapshot" -> {
                 bumpCursor(frame.optLong("cursor"))
                 frame.optJSONArray("networks")?.let { applyNetworks(it) }
-                if (frame.has("aliases")) applyAliases(frame.optJSONArray("aliases"))
+                if (frame.has("aliases")) {
+                    serverExtended = true
+                    applyAliases(frame.optJSONArray("aliases"))
+                }
             }
 
             "backlog" -> {
