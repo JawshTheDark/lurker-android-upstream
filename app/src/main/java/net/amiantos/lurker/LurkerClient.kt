@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import android.os.Handler
 import android.os.Looper
@@ -90,6 +91,9 @@ class LurkerClient {
 
     /** "networkId::#target" -> notify-always flag. */
     val notifyAlways = mutableStateMapOf<String, Boolean>()
+
+    /** Message ids the user has bookmarked (saved). Synced from the server. */
+    val bookmarkIds = mutableStateSetOf<Long>()
 
     // Channel-list browser (/LIST) state for the currently-viewed network.
     val chanlistRows = mutableStateListOf<ChannelListing>()
@@ -270,6 +274,7 @@ class LurkerClient {
             inputHistory.clear()
             aliases.clear()
             serverExtended = false
+            bookmarkIds.clear()
             pins.clear()
             nickNotes.clear()
             notifyAlways.clear()
@@ -645,6 +650,17 @@ class LurkerClient {
                 val key = "${frame.optInt("networkId")}::${frame.optString("nick").lowercase()}"
                 val note = frame.optString("note")
                 if (note.isEmpty()) nickNotes.remove(key) else nickNotes[key] = note
+            }
+
+            "bookmark-ids-snapshot" -> {
+                bookmarkIds.clear()
+                frame.optJSONArray("ids")?.let { a ->
+                    for (i in 0 until a.length()) bookmarkIds.add(a.optLong(i))
+                }
+            }
+            "bookmark-updated" -> {
+                val id = frame.optLong("messageId")
+                if (frame.optBoolean("saved")) bookmarkIds.add(id) else bookmarkIds.remove(id)
             }
 
             "chanlist-result" -> {
@@ -1619,6 +1635,16 @@ class LurkerClient {
         val networkId = buffer.networkId ?: return
         if (on) notifyAlways["$networkId::${buffer.target}"] = true else notifyAlways.remove("$networkId::${buffer.target}")
         ws?.send(JSONObject().put("type", "set-channel-notify-always").put("networkId", networkId).put("target", buffer.target).put("notifyAlways", on).toString())
+    }
+
+    fun isBookmarked(id: Long): Boolean = id in bookmarkIds
+
+    /** Save/unsave a message. Optimistic; the server echoes `bookmark-updated`. */
+    fun toggleBookmark(id: Long) {
+        if (id <= 0) return
+        val save = id !in bookmarkIds
+        if (save) bookmarkIds.add(id) else bookmarkIds.remove(id)
+        ws?.send(JSONObject().put("type", if (save) "set-bookmark" else "unset-bookmark").put("messageId", id).toString())
     }
 
     /** Add a simple ALL-level ignore for [mask] (bare-mask rule the server accepts). */

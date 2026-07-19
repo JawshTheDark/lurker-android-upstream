@@ -94,6 +94,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -714,6 +715,8 @@ private fun ChatScreen(
     DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
+    // Message whose long-press action sheet is open, if any.
+    var actionMsg by remember(buffer.key) { mutableStateOf<Msg?>(null) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
     // No "channel is encrypted" frame exists; infer from recent E2E traffic.
     val e2eActive = remember(messages.size) { messages.takeLast(200).any { it.e2e } }
@@ -936,6 +939,7 @@ private fun ChatScreen(
                     is ChatRow.Bubble -> MessageBubble(
                         row.msg, row.first, row.last, baseSize, openLink,
                         onMediaLoaded = { mediaTick++ },
+                        onAction = { actionMsg = it },
                     )
                     is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
@@ -1152,6 +1156,26 @@ private fun ChatScreen(
             buffer = buffer,
             messages = messages,
             onDismiss = { showE2e = false },
+        )
+    }
+
+    actionMsg?.let { m ->
+        MessageActions(
+            msg = m,
+            client = client,
+            onReply = {
+                val t = "${m.nick}: " + draft.text
+                draft = TextFieldValue(t, TextRange(t.length))
+                client.setDraftLocal(buffer, t)
+                actionMsg = null
+            },
+            onQuote = {
+                val t = "> ${m.text}\n" + draft.text
+                draft = TextFieldValue(t, TextRange(t.length))
+                client.setDraftLocal(buffer, t)
+                actionMsg = null
+            },
+            onDismiss = { actionMsg = null },
         )
     }
 }
@@ -1423,6 +1447,55 @@ private fun SheetAction(label: String, danger: Boolean = false, onClick: () -> U
     )
 }
 
+/** Long-press action sheet for a single message: copy / reply / quote / share / bookmark. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActions(
+    msg: Msg,
+    client: LurkerClient,
+    onReply: () -> Unit,
+    onQuote: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = SurfaceDark,
+    ) {
+        Text(
+            msg.text.replace("\n", " ").take(90).ifBlank { msg.nick },
+            color = TextSecondary,
+            fontSize = 13.sp,
+            maxLines = 2,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 6.dp),
+        )
+        HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 4.dp))
+        SheetAction("Copy text") {
+            clipboard.setText(AnnotatedString(msg.text))
+            onDismiss()
+        }
+        SheetAction("Reply") { onReply() }
+        SheetAction("Quote") { onQuote() }
+        SheetAction("Share…") {
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TEXT, msg.text)
+            }
+            context.startActivity(android.content.Intent.createChooser(send, null))
+            onDismiss()
+        }
+        if (msg.id > 0) {
+            SheetAction(if (client.isBookmarked(msg.id)) "Remove bookmark" else "Bookmark") {
+                client.toggleBookmark(msg.id)
+                onDismiss()
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
 /** Max file we'll buffer for a DCC send (the server's own ceiling is higher). */
 /**
  * Resolve a content Uri to (displayName, streaming RequestBody). No size cap
@@ -1469,6 +1542,7 @@ private fun MessageBubble(
     baseSize: Int,
     onLink: ((String) -> Unit)? = null,
     onMediaLoaded: () -> Unit = {},
+    onAction: ((Msg) -> Unit)? = null,
 ) {
     val self = msg.self
     // Grouping reads through the corners: the shared edge between messages of
@@ -1506,7 +1580,15 @@ private fun MessageBubble(
         val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
         Box(
             Modifier
+                .clip(shape)
                 .background(paintedBg ?: if (self) AccentBlue else SurfaceRaised, shape)
+                // Long-press opens the message action sheet. onClick is a no-op so
+                // link/media taps inside the text still reach their own handlers.
+                .then(
+                    if (onAction != null) {
+                        Modifier.combinedClickable(onClick = {}, onLongClick = { onAction(msg) })
+                    } else Modifier,
+                )
                 .padding(horizontal = 13.dp, vertical = 7.dp),
         ) {
             val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink)
