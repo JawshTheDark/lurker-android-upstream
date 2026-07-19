@@ -856,6 +856,7 @@ private fun BufferListBody(
                                 hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
                                 pinned = client.isPinned(buffer),
                                 notifyAll = client.isNotifyAlways(buffer),
+                                showNetwork = section.network == "★ Pinned",
                                 onTogglePin = if (buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
@@ -923,6 +924,7 @@ private fun BufferRow(
     hasDraft: Boolean = false,
     pinned: Boolean = false,
     notifyAll: Boolean = false,
+    showNetwork: Boolean = false,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -963,15 +965,27 @@ private fun BufferRow(
             .padding(16.dp, 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            buffer.displayName,
-            // Explicit: the glass screens sit outside a Scaffold, so there is no
-            // implicit Material content color to inherit.
-            color = TextPrimary,
-            fontSize = 17.sp,
-            fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.weight(1f),
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                buffer.displayName,
+                // Explicit: the glass screens sit outside a Scaffold, so there is no
+                // implicit Material content color to inherit.
+                color = TextPrimary,
+                fontSize = 17.sp,
+                fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal,
+            )
+            // The Pinned section flattens across networks, so a bare "#foo" is
+            // ambiguous when the same channel is joined on several networks —
+            // tag each pinned row with its network.
+            if (showNetwork && buffer.networkName.isNotBlank()) {
+                Text(
+                    buffer.networkName,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 1.dp),
+                )
+            }
+        }
         if (hasDraft) {
             Text("✎", color = TextSecondary, fontSize = 14.sp)
             Spacer(Modifier.width(8.dp))
