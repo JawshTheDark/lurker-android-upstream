@@ -275,16 +275,6 @@ class MainActivity : FragmentActivity() {
                     }
                 }
 
-                // A just-joined channel (which a 470 forward can rename) opens itself.
-                LaunchedEffect(client.pendingOpen) {
-                    client.pendingOpen?.let { buffer ->
-                        client.open(buffer)
-                        client.setActive(buffer)
-                        screen = Screen.Chat(buffer)
-                        client.pendingOpen = null
-                    }
-                }
-
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     // Width tiers. THREE-pane (>=1100dp, e.g. landscape tablet):
                     // list | chat | roster, all persistent. TWO-pane (840–1100dp,
