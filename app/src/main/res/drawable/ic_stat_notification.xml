@@ -1,0 +1,21 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Status-bar notification icon. Android renders small icons as a white
+         alpha silhouette (color is ignored), so this is a pure-white X that
+         fills the 24dp canvas edge-to-edge (unlike the launcher foreground,
+         whose X sits in the center safe-zone and came out tiny/blobby). Shared
+         by both flavors — the OS tints it regardless of build colour. -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M5,5 L19,19" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M19,5 L5,19" />
+</vector>

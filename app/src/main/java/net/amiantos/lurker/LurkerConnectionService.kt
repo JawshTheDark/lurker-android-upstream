@@ -42,7 +42,7 @@ class LurkerConnectionService : Service() {
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
         )
         val notif = NotificationCompat.Builder(this, Notifier.CHANNEL_SERVICE)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_notification)
             .setContentTitle("Lurker is staying connected")
             .setContentText("Highlights and DMs will notify you in the background.")
             .setContentIntent(open)

@@ -61,7 +61,7 @@ object Notifier {
         // so raw codes would show as literal "3,01" garbage.
         val body = Mirc.strip(e.text)
         val notif = NotificationCompat.Builder(context, if (e.isDm) CHANNEL_DMS else CHANNEL_MENTIONS)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_notification)
             .setContentTitle(title)
             .setContentText(body.take(200))
             .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(400)))
