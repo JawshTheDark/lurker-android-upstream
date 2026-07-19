@@ -252,12 +252,25 @@ class MainActivity : FragmentActivity() {
         if (prefs.backgroundConnect && prefs.hasSession) LurkerConnectionService.start(this)
         setContent {
             LurkerTheme {
+                // Hoisted above the lock gate: a relock returns early before this
+                // line, so declaring it here (below the gate) would forget the open
+                // chat on every unlock. Keeping it up top preserves it.
+                var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
+
+                // A dropped session (WS 401 → forceSignOutLocally) flips loggedIn
+                // false and clears the token without going through the UI sign-out,
+                // so stop the background service here too — otherwise its "staying
+                // connected" notification lingers over a dead session.
+                LaunchedEffect(client.loggedIn) {
+                    if (!client.loggedIn && !prefs.hasSession) {
+                        LurkerConnectionService.stop(this@MainActivity)
+                    }
+                }
+
                 if (locked) {
                     LockScreen(onUnlock = { promptUnlock() })
                     return@LurkerTheme
                 }
-
-                var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
 
                 if (!client.loggedIn) {
                     LoginScreen(client, prefs)
@@ -456,25 +469,54 @@ class MainActivity : FragmentActivity() {
 
     /** Show the system biometric / device-credential prompt; unlock on success. */
     private fun promptUnlock() {
-        val executor = ContextCompat.getMainExecutor(this)
-        val prompt = BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                (application as LurkerApp).unlocked = true
-                locked = false
-            }
-        })
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        // If the device can't authenticate at all (no biometric enrolled AND no
+        // PIN/pattern/password), don't strand the user behind a prompt that will
+        // only ever error — just let them in. (canAuthenticate is also checked
+        // before the toggle is even offered.)
+        if (BiometricManager.from(this).canAuthenticate(authenticators) !=
+            BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            unlock()
+            return
+        }
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) = unlock()
+                // Unrecoverable errors (no hardware, nothing enrolled, permanent
+                // lockout, user canceled) arrive here ASYNCHRONOUSLY — the old
+                // try/catch never saw them, which could hard-lock the app. Fall
+                // open on the terminal ones; transient errors leave the lock up so
+                // the "Unlock" button can retry.
+                override fun onAuthenticationError(code: Int, err: CharSequence) {
+                    when (code) {
+                        BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL,
+                        BiometricPrompt.ERROR_HW_NOT_PRESENT,
+                        BiometricPrompt.ERROR_HW_UNAVAILABLE,
+                        BiometricPrompt.ERROR_NO_BIOMETRICS,
+                        -> unlock()
+                    }
+                }
+            },
+        )
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Unlock Lurker")
             .setSubtitle("Confirm it's you to open your chats")
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+            .setAllowedAuthenticators(authenticators)
             .build()
         try {
             prompt.authenticate(info)
         } catch (_: Exception) {
-            // No usable authenticator enrolled — don't trap the user out.
-            (application as LurkerApp).unlocked = true
-            locked = false
+            unlock() // no usable authenticator — don't trap the user out
         }
+    }
+
+    private fun unlock() {
+        (application as LurkerApp).unlocked = true
+        locked = false
     }
 
     private companion object {
@@ -3076,6 +3118,15 @@ private fun PrefToggleCard(title: String, subtitle: String, checked: Boolean, on
 
 @Composable
 private fun BiometricLockCard(prefs: Prefs) {
+    val context = LocalContext.current
+    // Only offer the lock if the device can actually satisfy it (a biometric or a
+    // device PIN/pattern/password) — otherwise enabling it would strand the user.
+    val canAuth = remember {
+        BiometricManager.from(context).canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+        ) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+    if (!canAuth) return
     var on by remember { mutableStateOf(prefs.biometricLock) }
     PrefToggleCard(
         title = "Require unlock",

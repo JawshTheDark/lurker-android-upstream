@@ -72,9 +72,11 @@ class CommandsTest {
 
     @Test
     fun partDefaultsToCurrentChannel() {
+        // /part closes the buffer: it emits a close-buffer op (which PARTs with the
+        // reason server-side) targeting the current channel. /cycle keeps a bare part.
         val r = ops("/part later", target = "#dev")
-        assertEquals("part", r.ops[0].type)
-        assertEquals("#dev", r.ops[0].channel)
+        assertEquals("close", r.ops[0].type)
+        assertEquals("#dev", r.ops[0].target)
         assertEquals("later", r.ops[0].reason)
     }
 

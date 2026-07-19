@@ -306,6 +306,37 @@ class LurkerClient {
             settingsRegistry.clear()
             settingsValues.clear()
             settingsLoaded = false
+            // The client is process-scoped, so sign-out→sign-in happens without
+            // process death — none of this transient state may leak into the next
+            // account. Cancel the reconnect timer so it can't fire against a fresh
+            // login, and reset the connection/paging/UI flags to their defaults.
+            cancelScheduledReconnect()
+            connecting = false
+            activeKey = null
+            activeBuffer = null
+            markReadQueued = false
+            chanlistLoading = false
+            chanlistInProgress = false
+            chanlistTotalCount = 0
+            chanlistKey = ""
+            chanlistNetworkId = -1
+            dccEnabled = true
+            dccError = null
+            networkConfigs.clear()
+            networksError = null
+            networkNames.clear()
+            searchLoading = false
+            searchHasMore = false
+            searchError = null
+            searchNextBefore = null
+            lastSearchRaw = ""
+            highlightsLoading = false
+            highlightsNextBefore = null
+            highlightsHasMore = false
+            settingsError = null
+            draftPending.clear()
+            draftFlush.values.forEach(main::removeCallbacks)
+            draftFlush.clear()
         }
     }
 
@@ -598,7 +629,9 @@ class LurkerClient {
                 // check (names/channel-parted produce no chat line at all).
                 applyMemberEvent(buffer.key, frame)
                 val msg = parseEvent(frame) ?: return
-                mergeInto(buffer.key, listOf(msg), replace = false)
+                // A re-delivered message (e.g. the boundary id on a ?since= resume)
+                // is deduped by mergeInto — don't re-count its badge or re-notify.
+                if (!mergeInto(buffer.key, listOf(msg), replace = false)) return
                 countUnread(buffer.key, frame, msg)
                 if (msg.id > 0) scheduleMarkRead(buffer.key)
                 if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground)) {
@@ -1037,19 +1070,22 @@ class LurkerClient {
         return buffer
     }
 
-    private fun mergeInto(key: String, newMsgs: List<Msg>, replace: Boolean) {
+    /** Returns whether anything was actually added (false = every id was a dup),
+     *  so the live path can avoid double-counting a re-delivered message. */
+    private fun mergeInto(key: String, newMsgs: List<Msg>, replace: Boolean): Boolean {
         if (replace) {
             messagesByBuffer[key] = newMsgs
-            return
+            return true
         }
         val existing = messagesByBuffer[key] ?: emptyList()
         if (existing.isEmpty()) {
             messagesByBuffer[key] = newMsgs
-            return
+            return true
         }
         val ids = existing.mapNotNull { if (it.id > 0) it.id else null }.toHashSet()
         val add = newMsgs.filter { it.id <= 0 || ids.add(it.id) }
         if (add.isNotEmpty()) messagesByBuffer[key] = existing + add
+        return add.isNotEmpty()
     }
 
     // ---- Unread accounting ------------------------------------------------

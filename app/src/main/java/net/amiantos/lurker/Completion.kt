@@ -59,7 +59,8 @@ object Completion {
     /** Command candidates for a "/verb" prefix (built-ins + any user aliases). */
     fun commands(prefix: String, verbs: List<String>): List<String> {
         val p = prefix.removePrefix("/").lowercase()
-        return verbs.filter { it.startsWith(p) }.sorted().map { "/$it" }
+        // Case-insensitive on the candidate too — user aliases can be mixed-case.
+        return verbs.filter { it.lowercase().startsWith(p) }.sorted().map { "/$it" }
     }
 
     /** The built-in slash verbs the app understands (for command completion). */
