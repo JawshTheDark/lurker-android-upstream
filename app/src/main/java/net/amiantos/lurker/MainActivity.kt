@@ -22,8 +22,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -973,6 +981,13 @@ private fun ChatScreen(
     }
     // Flush the draft when leaving this buffer.
     DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
+    // Prefix the composer with "nick: " — the shared reply seam for the
+    // long-press action sheet and the swipe-to-reply gesture.
+    fun replyTo(m: Msg) {
+        val t = "${m.nick}: " + draft.text
+        draft = TextFieldValue(t, TextRange(t.length))
+        client.setDraftLocal(buffer, t)
+    }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
     // Message whose long-press action sheet is open, if any.
@@ -1200,6 +1215,7 @@ private fun ChatScreen(
                         row.msg, row.first, row.last, baseSize, openLink,
                         onMediaLoaded = { mediaTick++ },
                         onAction = { actionMsg = it },
+                        onSwipeReply = { replyTo(it) },
                     )
                     is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
@@ -1426,9 +1442,7 @@ private fun ChatScreen(
             msg = m,
             client = client,
             onReply = {
-                val t = "${m.nick}: " + draft.text
-                draft = TextFieldValue(t, TextRange(t.length))
-                client.setDraftLocal(buffer, t)
+                replyTo(m)
                 actionMsg = null
             },
             onQuote = {
@@ -1870,8 +1884,18 @@ private fun MessageBubble(
     onLink: ((String) -> Unit)? = null,
     onMediaLoaded: () -> Unit = {},
     onAction: ((Msg) -> Unit)? = null,
+    onSwipeReply: ((Msg) -> Unit)? = null,
 ) {
     val self = msg.self
+    // Swipe a bubble sideways to reply (reuses the long-press reply seam). The
+    // bubble tracks the drag; releasing past the threshold fires, with a haptic.
+    val offsetX = remember(msg.id) { androidx.compose.animation.core.Animatable(0f) }
+    val dragScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
+    val maxDragPx = with(density) { 72.dp.toPx() }
+    val triggerPx = with(density) { 56.dp.toPx() }
+    var firedThisDrag by remember(msg.id) { mutableStateOf(false) }
     // Grouping reads through the corners: the shared edge between messages of
     // one group is tightened, the outside stays fully rounded.
     val big = 18.dp
@@ -1886,6 +1910,30 @@ private fun MessageBubble(
         horizontalAlignment = if (self) Alignment.End else Alignment.Start,
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (onSwipeReply != null) {
+                    Modifier
+                        .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                        .draggable(
+                            orientation = Orientation.Horizontal,
+                            state = rememberDraggableState { delta ->
+                                dragScope.launch {
+                                    val next = (offsetX.value + delta).coerceIn(0f, maxDragPx)
+                                    if (next >= triggerPx && !firedThisDrag) {
+                                        firedThisDrag = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    }
+                                    offsetX.snapTo(next)
+                                }
+                            },
+                            onDragStopped = {
+                                if (offsetX.value >= triggerPx) onSwipeReply(msg)
+                                firedThisDrag = false
+                                offsetX.animateTo(0f)
+                            },
+                        )
+                } else Modifier,
+            )
             .padding(
                 start = if (self) 64.dp else 12.dp,
                 end = if (self) 12.dp else 64.dp,
