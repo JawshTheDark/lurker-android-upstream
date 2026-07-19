@@ -4,7 +4,12 @@
 package net.amiantos.lurker
 
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -190,11 +195,15 @@ private sealed interface Screen {
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     // Process-scoped: the socket + buffer state outlive Activity recreation
     // (rotation, the tablet/phone layout switch) and are shared with the
     // background service, instead of a fresh client per Activity.
     private val client: LurkerClient get() = (application as LurkerApp).client
+    private val prefs by lazy { Prefs(this) }
+
+    /** True while the biometric lock is covering the UI (see [promptUnlock]). */
+    private var locked by mutableStateOf(false)
 
     /** A file arriving via the system share sheet, waiting for a buffer pick. */
     private var sharedUri by mutableStateOf<Uri?>(null)
@@ -209,7 +218,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val prefs = Prefs(this)
+        // Cover the UI immediately if the lock is on and we haven't unlocked this
+        // process; onResume runs the prompt.
+        locked = prefs.biometricLock && !(application as LurkerApp).unlocked
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
         client.start(prefs)
@@ -223,8 +234,16 @@ class MainActivity : ComponentActivity() {
         }
         consumeShareIntent(intent)
         consumeNotificationIntent(intent)
+        // Opt-in always-on: revive the liveness anchor on launch (from the
+        // foreground, so the background-start rule never bites).
+        if (prefs.backgroundConnect && prefs.hasSession) LurkerConnectionService.start(this)
         setContent {
             LurkerTheme {
+                if (locked) {
+                    LockScreen(onUnlock = { promptUnlock() })
+                    return@LurkerTheme
+                }
+
                 var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
 
                 if (!client.loggedIn) {
@@ -269,7 +288,7 @@ class MainActivity : ComponentActivity() {
                             onSearch = { screen = Screen.Search },
                             onFriends = { screen = Screen.Friends },
                             onBrowse = { screen = Screen.ChannelList },
-                            onSignOut = { client.signOut() },
+                            onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                             showRoster = roomForRoster,
                         )
                         return@BoxWithConstraints
@@ -289,7 +308,7 @@ class MainActivity : ComponentActivity() {
                         onSearch = { screen = Screen.Search },
                         onFriends = { screen = Screen.Friends },
                         onBrowse = { screen = Screen.ChannelList },
-                        onSignOut = { client.signOut() },
+                        onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
                         client = client,
@@ -383,11 +402,50 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         client.onForeground()
+        // Re-lock only after a real trip away (>2s), so a rotation/layout switch
+        // doesn't re-prompt. First launch: backgroundedAt is 0 → treated as away.
+        if (prefs.biometricLock) {
+            val app = application as LurkerApp
+            val awayMs = if (app.backgroundedAt > 0) SystemClock.elapsedRealtime() - app.backgroundedAt else Long.MAX_VALUE
+            if (!app.unlocked || awayMs > RELOCK_GRACE_MS) {
+                app.unlocked = false
+                locked = true
+                promptUnlock()
+            }
+        }
     }
 
     override fun onStop() {
         super.onStop()
         client.onBackground()
+        (application as LurkerApp).backgroundedAt = SystemClock.elapsedRealtime()
+    }
+
+    /** Show the system biometric / device-credential prompt; unlock on success. */
+    private fun promptUnlock() {
+        val executor = ContextCompat.getMainExecutor(this)
+        val prompt = BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                (application as LurkerApp).unlocked = true
+                locked = false
+            }
+        })
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock Lurker")
+            .setSubtitle("Confirm it's you to open your chats")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+            .build()
+        try {
+            prompt.authenticate(info)
+        } catch (_: Exception) {
+            // No usable authenticator enrolled — don't trap the user out.
+            (application as LurkerApp).unlocked = true
+            locked = false
+        }
+    }
+
+    private companion object {
+        const val RELOCK_GRACE_MS = 2000L
     }
 }
 
@@ -478,6 +536,22 @@ private fun TabletHome(
                     onOpenBuffer = onSelect,
                     onPickFileFor = { nick -> dccNick = nick; filePicker.launch("*/*") },
                 )
+            }
+        }
+    }
+}
+
+/** Full-bleed cover shown while the biometric lock is engaged. */
+@Composable
+private fun LockScreen(onUnlock: () -> Unit) {
+    Box(Modifier.fillMaxSize().background(CanvasBlack), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("🔒", fontSize = 48.sp)
+            Spacer(Modifier.height(16.dp))
+            Text("Lurker is locked", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(20.dp))
+            TextButton(onClick = onUnlock) {
+                Text("Unlock", color = AccentBlue, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -2703,6 +2777,8 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { Spacer(Modifier.height(8.dp)) }
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
+                item { BiometricLockCard(prefs) }
+                item { BackgroundConnectCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
                 if (client.serverExtended) item { AliasesCard(client) }
                 items(orderedCategories.size) { i ->
@@ -2854,6 +2930,54 @@ private fun InlineMediaCard(prefs: Prefs) {
                 onCheckedChange = { Ui.inlineMedia = it; prefs.inlineMedia = it },
             )
         }
+    }
+}
+
+/** A titled on-device toggle row, matching the InlineMedia/theme cards. */
+@Composable
+private fun PrefToggleCard(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 17.sp)
+                Text(subtitle, color = TextSecondary, fontSize = 12.sp)
+            }
+            Switch(checked = checked, onCheckedChange = onChange)
+        }
+    }
+}
+
+@Composable
+private fun BiometricLockCard(prefs: Prefs) {
+    var on by remember { mutableStateOf(prefs.biometricLock) }
+    PrefToggleCard(
+        title = "Require unlock",
+        subtitle = "Ask for fingerprint, face, or device PIN each time the app opens.",
+        checked = on,
+    ) { on = it; prefs.biometricLock = it }
+}
+
+@Composable
+private fun BackgroundConnectCard(prefs: Prefs) {
+    val context = LocalContext.current
+    var on by remember { mutableStateOf(prefs.backgroundConnect) }
+    PrefToggleCard(
+        title = "Stay connected in background",
+        subtitle = "Keep a persistent notification so highlights & DMs notify you even when the app is closed.",
+        checked = on,
+    ) {
+        on = it
+        prefs.backgroundConnect = it
+        if (it) LurkerConnectionService.start(context) else LurkerConnectionService.stop(context)
     }
 }
 

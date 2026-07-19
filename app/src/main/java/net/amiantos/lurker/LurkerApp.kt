@@ -24,6 +24,12 @@ import coil.disk.DiskCache
 class LurkerApp : Application(), ImageLoaderFactory {
     val client: LurkerClient by lazy { LurkerClient() }
 
+    // Biometric-lock state kept here (not in the Activity) so it survives Activity
+    // recreation — rotating the screen shouldn't re-prompt. backgroundedAt lets
+    // onResume re-lock only after a real trip away, not a config change.
+    var unlocked = false
+    var backgroundedAt = 0L
+
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP

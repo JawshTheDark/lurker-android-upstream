@@ -21,6 +21,7 @@ import androidx.core.app.NotificationManagerCompat
 object Notifier {
     private const val CHANNEL_MENTIONS = "mentions"
     private const val CHANNEL_DMS = "dms"
+    const val CHANNEL_SERVICE = "connection"
     const val EXTRA_NETWORK_ID = "lurker.networkId"
     const val EXTRA_TARGET = "lurker.target"
 
@@ -31,6 +32,12 @@ object Notifier {
         )
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL_DMS, "Direct messages", NotificationManager.IMPORTANCE_HIGH),
+        )
+        // Silent, low-key ongoing notification for the opt-in background service.
+        mgr.createNotificationChannel(
+            NotificationChannel(CHANNEL_SERVICE, "Background connection", NotificationManager.IMPORTANCE_LOW).apply {
+                setShowBadge(false)
+            },
         )
     }
 
