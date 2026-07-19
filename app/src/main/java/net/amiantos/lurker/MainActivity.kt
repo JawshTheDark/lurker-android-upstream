@@ -876,6 +876,7 @@ private fun BufferListBody(
                                 notifyAll = client.isNotifyAlways(buffer),
                                 showNetwork = section.network == "★ Pinned" || isFriendRow,
                                 online = if (isFriendRow) client.isPresent(buffer.networkId, buffer.target) else null,
+                                label = if (isFriendRow) client.friendDisplayName(buffer) else null,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
@@ -975,6 +976,7 @@ private fun BufferRow(
     notifyAll: Boolean = false,
     showNetwork: Boolean = false,
     online: Boolean? = null,
+    label: String? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -1026,7 +1028,7 @@ private fun BufferRow(
         }
         Column(Modifier.weight(1f)) {
             Text(
-                buffer.displayName,
+                label ?: buffer.displayName,
                 // Explicit: the glass screens sit outside a Scaffold, so there is no
                 // implicit Material content color to inherit.
                 color = TextPrimary,

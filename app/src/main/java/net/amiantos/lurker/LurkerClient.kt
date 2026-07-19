@@ -1292,6 +1292,14 @@ class LurkerClient {
     /** A network's display name, for synthesizing a buffer row we don't hold yet. */
     fun networkName(id: Int): String = networkNames[id] ?: "network"
 
+    /** The contact's display NAME for a buffer whose key matches a friend's primary
+     *  target — a Lurker friend is a named entity with (nick, network) targets, so
+     *  the Friends row should read the friend's name, not the underlying nick. */
+    fun friendDisplayName(buffer: Buffer): String? =
+        contacts.firstOrNull { c ->
+            c.primary?.let { "${it.networkId}::${it.nick}" == buffer.key } == true
+        }?.displayName?.takeIf { it.isNotBlank() }
+
     /** True when a nick is known to be present (online/away/back — anything but
      *  an explicit offline). Used to sort + dot the Friends buffer-list section. */
     fun isPresent(networkId: Int?, nick: String): Boolean {
