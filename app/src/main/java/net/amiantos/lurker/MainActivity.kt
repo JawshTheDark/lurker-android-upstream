@@ -894,7 +894,9 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     val pinned = client.buffers.filter { client.isPinned(it) }
     if (pinned.isNotEmpty()) out.add(BufferSection("★ Pinned", pinned.sortedBy { it.target.lowercase() }))
 
-    val byNetwork = client.buffers.groupBy { it.networkName }
+    // Pinned buffers live only in the Pinned section — drop them from their
+    // network group so they don't show twice (matches the web client).
+    val byNetwork = client.buffers.filterNot { client.isPinned(it) }.groupBy { it.networkName }
     byNetwork.keys
         .sortedWith(compareBy({ client.networkOrder(it) }, { it.lowercase() }))
         .forEach { network ->
