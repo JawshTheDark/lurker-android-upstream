@@ -667,6 +667,17 @@ class LurkerClient {
                     }
                     return
                 }
+                // A part/channel-parted for a channel we don't hold an open buffer
+                // for (a FAILED join, or the leg of a forward we bailed on) must NOT
+                // spawn a ghost buffer via ensureBuffer below (amiantos). Drop it —
+                // you can't leave a channel you were never in. (pendingJoin is left
+                // to expire; a real channel-joined still focuses where we land.)
+                val partType = frame.optString("type")
+                if ((partType == "channel-parted" || partType == "part") &&
+                    buffers.none { it.key == "${networkId ?: "sys"}::$target" }
+                ) {
+                    return
+                }
                 bumpCursor(frame.optLong("id"))
                 val buffer = ensureBuffer(networkId, target)
                 // Roster updates ride the same stream; apply before the renderable
