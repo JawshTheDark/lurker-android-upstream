@@ -24,10 +24,10 @@ android {
     defaultConfig {
         // 33 (Android 13) so the app installs on e-ink Android devices, which lag
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
-        minSdk = 33
+        minSdk = 31
         targetSdk = 36
-        versionCode = 26
-        versionName = "0.9.6"
+        versionCode = 27
+        versionName = "0.9.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
