@@ -179,6 +179,7 @@ private sealed interface Screen {
     data object Dcc : Screen
     data object Networks : Screen
     data object Search : Screen
+    data object Friends : Screen
     data object ChannelList : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
@@ -219,6 +220,7 @@ class MainActivity : ComponentActivity() {
                         onDcc = { client.loadDcc(); screen = Screen.Dcc },
                         onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
                         onSearch = { screen = Screen.Search },
+                        onFriends = { screen = Screen.Friends },
                         onBrowse = { screen = Screen.ChannelList },
                         onSignOut = { client.signOut() },
                     )
@@ -252,6 +254,14 @@ class MainActivity : ComponentActivity() {
                         client = client,
                         onOpenResult = { networkId, target ->
                             val buffer = client.focusTarget(networkId, target)
+                            client.setActive(buffer)
+                            screen = Screen.Chat(buffer)
+                        },
+                        onBack = { screen = Screen.Buffers },
+                    )
+                    Screen.Friends -> FriendsScreen(
+                        client = client,
+                        onOpenBuffer = { buffer ->
                             client.setActive(buffer)
                             screen = Screen.Chat(buffer)
                         },
@@ -370,6 +380,7 @@ private fun BufferListScreen(
     onDcc: () -> Unit,
     onNetworks: () -> Unit,
     onSearch: () -> Unit,
+    onFriends: () -> Unit,
     onBrowse: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -435,6 +446,7 @@ private fun BufferListScreen(
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(text = { Text("Browse channels (/LIST)") }, onClick = { menuOpen = false; onBrowse() })
                         DropdownMenuItem(text = { Text("Mark all read") }, onClick = { menuOpen = false; client.markAllRead() })
+                        DropdownMenuItem(text = { Text("Friends") }, onClick = { menuOpen = false; onFriends() })
                         DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
                         DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
@@ -1399,6 +1411,12 @@ private fun MemberActions(
             onOpenBuffer(client.focusTarget(networkId, nick))
         }
         SheetAction(if (client.nickNote(networkId, nick) != null) "Edit note" else "Add note") { editNote = true }
+        if (client.contacts.none { c -> c.targets.any { it.networkId == networkId && it.nick.equals(nick, true) } }) {
+            SheetAction("Add as friend") {
+                client.setContact(null, nick, notifyOnline = true, listOf(ContactTarget(networkId, nick, isPrimary = true)))
+                onDone()
+            }
+        }
         SheetAction("Ignore", danger = true) { client.addIgnore(networkId, member.banMask); onDone() }
         // FORK-ONLY (outgoing DCC): only when the server supports it.
         if (client.serverExtended) {
@@ -3243,6 +3261,72 @@ private fun ChannelListScreen(
 }
 
 // ---- DCC -----------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    // Refresh each friend's presence on entry.
+    LaunchedEffect(client.contacts.size) {
+        client.contacts.forEach { c -> c.primary?.let { client.probePresence(it.networkId, it.nick) } }
+    }
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = CanvasBlack,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = CanvasBlack),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text("Friends", fontWeight = FontWeight.SemiBold) },
+            )
+        },
+    ) { padding ->
+        val friends = remember(client.contacts.toList()) { client.contacts.sortedBy { it.displayName.lowercase() } }
+        LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+            if (friends.isEmpty()) {
+                item {
+                    Text(
+                        "No friends yet. Long-press a nick in a channel's member list and choose “Add as friend.”",
+                        color = TextSecondary,
+                        modifier = Modifier.padding(24.dp),
+                    )
+                }
+            }
+            items(friends.size) { i ->
+                val c = friends[i]
+                val t = c.primary
+                val dot = when (t?.let { client.presenceOf(it) }) {
+                    "online", "back" -> OnlineGreen
+                    "away" -> NoticeAmber
+                    else -> TextSecondary
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = t != null) {
+                            t?.let { onOpenBuffer(client.focusTarget(it.networkId, it.nick)) }
+                        }
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
+                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                        Text(c.displayName, fontSize = 16.sp, color = TextPrimary)
+                        val sub = t?.let { "${it.nick} · ${client.networks[it.networkId]?.name ?: "net ${it.networkId}"}" } ?: "no target"
+                        Text(sub, fontSize = 13.sp, color = TextSecondary)
+                    }
+                    TextButton(onClick = { client.deleteContact(c.id) }) {
+                        Text("Remove", color = AlertRed, fontSize = 13.sp)
+                    }
+                }
+                HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 20.dp))
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

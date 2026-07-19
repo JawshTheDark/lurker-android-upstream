@@ -66,6 +66,20 @@ data class DccTransfer(
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
 }
 
+/** One reachable identity (network + nick) for a contact. */
+data class ContactTarget(val networkId: Int, val nick: String, val isPrimary: Boolean = false)
+
+/** A friend/contact the server tracks and reports presence for. */
+data class Contact(
+    val id: Int,
+    val displayName: String,
+    val notifyOnline: Boolean,
+    val targets: List<ContactTarget>,
+) {
+    /** The identity to open when the contact row is tapped (primary, else first). */
+    val primary: ContactTarget? get() = targets.firstOrNull { it.isPrimary } ?: targets.firstOrNull()
+}
+
 /** A server-synced custom slash alias: /name expands to expansion with $1..$9 params. */
 data class AliasEntry(val id: Int, val name: String, val expansion: String)
 

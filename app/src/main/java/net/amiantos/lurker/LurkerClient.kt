@@ -95,6 +95,12 @@ class LurkerClient {
     /** Message ids the user has bookmarked (saved). Synced from the server. */
     val bookmarkIds = mutableStateSetOf<Long>()
 
+    /** Friends/contacts, synced from contacts-snapshot + contact-updated/deleted. */
+    val contacts = mutableStateListOf<Contact>()
+
+    /** "networkId::nickLower" -> presence state (online/offline/away/back). */
+    val presence = mutableStateMapOf<String, String>()
+
     // Channel-list browser (/LIST) state for the currently-viewed network.
     val chanlistRows = mutableStateListOf<ChannelListing>()
     var chanlistLoading by mutableStateOf(false)
@@ -275,6 +281,8 @@ class LurkerClient {
             aliases.clear()
             serverExtended = false
             bookmarkIds.clear()
+            contacts.clear()
+            presence.clear()
             pins.clear()
             nickNotes.clear()
             notifyAlways.clear()
@@ -558,6 +566,16 @@ class LurkerClient {
                     applyTyping("${networkId ?: "sys"}::$target", networkId, frame)
                     return
                 }
+                // Friend presence is ephemeral (server pseudo-target) — record it
+                // and bail before ensureBuffer so it never spawns a buffer.
+                if (frame.optString("type") == "peer-presence") {
+                    val nick = frame.optString("nick")
+                    if (networkId != null && nick.isNotEmpty()) {
+                        val k = "$networkId::${nick.lowercase()}"
+                        if (frame.isNull("state")) presence.remove(k) else presence[k] = frame.optString("state")
+                    }
+                    return
+                }
                 bumpCursor(frame.optLong("id"))
                 val buffer = ensureBuffer(networkId, target)
                 // Roster updates ride the same stream; apply before the renderable
@@ -661,6 +679,22 @@ class LurkerClient {
             "bookmark-updated" -> {
                 val id = frame.optLong("messageId")
                 if (frame.optBoolean("saved")) bookmarkIds.add(id) else bookmarkIds.remove(id)
+            }
+
+            "contacts-snapshot" -> {
+                val arr = frame.optJSONArray("contacts")
+                contacts.clear()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    parseContact(arr.optJSONObject(i))?.let(contacts::add)
+                }
+            }
+            "contact-updated" -> parseContact(frame.optJSONObject("contact"))?.let { c ->
+                val i = contacts.indexOfFirst { it.id == c.id }
+                if (i >= 0) contacts[i] = c else contacts.add(c)
+            }
+            "contact-deleted" -> {
+                val id = frame.optInt("contactId", -1)
+                contacts.removeAll { it.id == id }
             }
 
             "chanlist-result" -> {
@@ -1108,6 +1142,39 @@ class LurkerClient {
 
     fun addAlias(name: String, expansion: String) {
         ws?.send(JSONObject().put("type", "add-alias").put("name", name).put("expansion", expansion).toString())
+    }
+
+    private fun parseContact(o: JSONObject?): Contact? {
+        if (o == null) return null
+        val targetsArr = o.optJSONArray("targets")
+        val targets = if (targetsArr == null) emptyList() else (0 until targetsArr.length()).mapNotNull { i ->
+            val t = targetsArr.optJSONObject(i) ?: return@mapNotNull null
+            ContactTarget(t.optInt("networkId"), t.optString("nick"), t.optBoolean("isPrimary"))
+        }
+        return Contact(o.optInt("id"), o.optString("displayName"), o.optBoolean("notifyOnline", true), targets)
+    }
+
+    /** Presence state for a contact target, or null if unknown. */
+    fun presenceOf(t: ContactTarget): String? = presence["${t.networkId}::${t.nick.lowercase()}"]
+
+    /** Create (contactId=null) or update a contact, then let the server echo it back. */
+    fun setContact(contactId: Int?, displayName: String, notifyOnline: Boolean, targets: List<ContactTarget>) {
+        val arr = JSONArray()
+        targets.forEach { arr.put(JSONObject().put("networkId", it.networkId).put("nick", it.nick).put("isPrimary", it.isPrimary)) }
+        val msg = JSONObject().put("type", "set-contact").put("displayName", displayName)
+            .put("notifyOnline", notifyOnline).put("targets", arr)
+        if (contactId != null) msg.put("contactId", contactId)
+        ws?.send(msg.toString())
+    }
+
+    fun deleteContact(contactId: Int) {
+        contacts.removeAll { it.id == contactId }
+        ws?.send(JSONObject().put("type", "delete-contact").put("contactId", contactId).toString())
+    }
+
+    /** Ask the server to refresh a nick's presence (e.g. when opening their DM). */
+    fun probePresence(networkId: Int, nick: String) {
+        ws?.send(JSONObject().put("type", "probe-presence").put("networkId", networkId).put("nick", nick).toString())
     }
 
     fun removeAlias(id: Int) {
