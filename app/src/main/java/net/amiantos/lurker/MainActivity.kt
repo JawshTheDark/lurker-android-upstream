@@ -633,12 +633,11 @@ private fun BufferListBody(
     onOpen: (Buffer) -> Unit,
 ) {
     LazyColumn(
-        Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 1f),
-        contentPadding = PaddingValues(
-            top = topPadding + 4.dp,
-            // Edge-to-edge list: keep the last rows above the navigation bar.
-            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
-        ),
+        // Clip the scroll viewport above the nav bar (padding, not just
+        // contentPadding, so rows never render under it mid-scroll) while the
+        // ambient background behind still fills edge-to-edge.
+        Modifier.fillMaxSize().navigationBarsPadding().hazeSource(hazeState, zIndex = 1f),
+        contentPadding = PaddingValues(top = topPadding + 4.dp, bottom = 8.dp),
     ) {
             if (sharePending) {
                 item {
@@ -1546,7 +1545,7 @@ private fun MemberPane(
         (client.members[buffer.key] ?: emptyList())
             .sortedWith(compareBy({ it.rank }, { it.nick.lowercase() }))
     }
-    Column(Modifier.fillMaxSize().background(SurfaceDark).padding(top = 12.dp)) {
+    Column(Modifier.fillMaxSize().background(SurfaceDark).navigationBarsPadding().padding(top = 12.dp)) {
         val sel = selected
         if (sel == null) {
             Text(
