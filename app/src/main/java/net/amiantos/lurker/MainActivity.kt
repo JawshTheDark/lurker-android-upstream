@@ -1518,7 +1518,10 @@ private fun E2eSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         sheetGesturesEnabled = false,
-        containerColor = SurfaceDark,
+        // Keep a touch of translucency but not so much the chat bleeds through and
+        // hurts readability — only lifts the see-through Dark theme (~0.70), leaves
+        // the already-near-opaque Oled/Light surfaces alone.
+        containerColor = SurfaceDark.copy(alpha = SurfaceDark.alpha.coerceAtLeast(0.94f)),
     ) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
             Text(
@@ -1588,7 +1591,10 @@ private fun MemberSheet(
         // it closed. Close via scrim tap or back.
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         sheetGesturesEnabled = false,
-        containerColor = SurfaceDark,
+        // Keep a touch of translucency but not so much the chat bleeds through and
+        // hurts readability — only lifts the see-through Dark theme (~0.70), leaves
+        // the already-near-opaque Oled/Light surfaces alone.
+        containerColor = SurfaceDark.copy(alpha = SurfaceDark.alpha.coerceAtLeast(0.94f)),
     ) {
         val roster = remember(client.members[buffer.key]) {
             (client.members[buffer.key] ?: emptyList())
@@ -1680,7 +1686,12 @@ private fun MemberPane(
         (client.members[buffer.key] ?: emptyList())
             .sortedWith(compareBy({ it.rank }, { it.nick.lowercase() }))
     }
-    Column(Modifier.fillMaxSize().background(SurfaceDark).navigationBarsPadding().padding(top = 12.dp)) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(SurfaceDark.copy(alpha = SurfaceDark.alpha.coerceAtLeast(0.94f)))
+            .navigationBarsPadding()
+            .padding(top = 12.dp),
+    ) {
         val sel = selected
         if (sel == null) {
             Text(
