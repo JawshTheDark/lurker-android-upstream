@@ -101,6 +101,15 @@ class LurkerClient {
     /** "networkId::nickLower" -> presence state (online/offline/away/back). */
     val presence = mutableStateMapOf<String, String>()
 
+    /** One-shot signal to the UI: open+focus this buffer (the channel we actually
+     *  joined, which a 470 forward can make differ from what we asked for). The UI
+     *  navigates to it and clears it. */
+    var pendingOpen: Buffer? by mutableStateOf(null)
+
+    /** networkId -> (requested channel, requestedAt) for a user-initiated join, so
+     *  a channel forward can retarget focus to the channel actually joined. */
+    private val pendingJoin = mutableMapOf<Int, Pair<String, Long>>()
+
     /** True while the Activity is in the foreground (badge is enough; no notif). */
     private var appForeground = true
 
@@ -294,6 +303,8 @@ class LurkerClient {
             inputHistory.clear()
             aliases.clear()
             serverExtended = false
+            pendingOpen = null
+            pendingJoin.clear()
             bookmarkIds.clear()
             contacts.clear()
             presence.clear()
@@ -589,6 +600,29 @@ class LurkerClient {
                     if (networkId != null && nick.isNotEmpty()) {
                         val k = "$networkId::${nick.lowercase()}"
                         if (frame.isNull("state")) presence.remove(k) else presence[k] = frame.optString("state")
+                    }
+                    return
+                }
+                // The server confirms which channel we actually joined — which a
+                // 470 forward (#x → ##x) can make differ from what we asked for.
+                // Make sure that buffer exists and, if this fulfils a join the user
+                // just requested, focus it (dropping the phantom optimistic buffer
+                // for the requested-but-not-joined name).
+                if (frame.optString("type") == "channel-joined") {
+                    val buffer = ensureBuffer(networkId, target)
+                    val pend = networkId?.let { pendingJoin[it] }
+                    if (networkId != null && pend != null &&
+                        System.currentTimeMillis() - pend.second < JOIN_FOCUS_WINDOW_MS
+                    ) {
+                        pendingJoin.remove(networkId)
+                        if (!target.equals(pend.first, true)) {
+                            val phantom = "$networkId::${pend.first}"
+                            buffers.removeAll { it.key == phantom }
+                            messagesByBuffer.remove(phantom)
+                            unread.remove(phantom)
+                            highlights.remove(phantom)
+                        }
+                        pendingOpen = buffer
                     }
                     return
                 }
@@ -1346,6 +1380,12 @@ class LurkerClient {
     }
 
     /** Execute the parsed composer input against [buffer]. */
+    /** Record a user-initiated join so a channel forward (470) can retarget focus
+     *  from the requested channel to the one we actually land in. */
+    private fun noteJoinRequest(networkId: Int, channel: String) {
+        pendingJoin[networkId] = channel to System.currentTimeMillis()
+    }
+
     fun execute(buffer: Buffer, ops: List<WireOp>) {
         val networkId = buffer.networkId ?: return
         val socket = ws ?: return
@@ -1366,7 +1406,12 @@ class LurkerClient {
                 "raw" -> frame.put("type", "raw").put("line", op.line)
                 // {type:'e2e', networkId, target, args} — server runs the subcommand.
                 "e2e" -> frame.put("type", "e2e").put("target", target).put("args", op.line.orEmpty())
-                "join" -> frame.put("type", "join").put("channel", op.channel)
+                "join" -> {
+                    frame.put("type", "join").put("channel", op.channel)
+                    // Remember it so a server-side channel forward (470: #x → ##x)
+                    // can retarget the UI to the channel we actually land in.
+                    op.channel?.let { noteJoinRequest(networkId, it) }
+                }
                 "part" -> {
                     frame.put("type", "part").put("channel", op.channel)
                     op.reason?.let { frame.put("reason", it) }
@@ -1904,6 +1949,9 @@ class LurkerClient {
 
         /** Backgrounds shorter than this (task-switcher hops) skip the cycle. */
         const val BACKGROUND_CYCLE_MS = 3_000L
+
+        /** A channel-joined arriving within this of a join request focuses it. */
+        const val JOIN_FOCUS_WINDOW_MS = 15_000L
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }
