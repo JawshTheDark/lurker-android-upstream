@@ -30,6 +30,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -2067,7 +2071,7 @@ private fun MediaEmbed(url: String, onOpen: () -> Unit, onLoaded: () -> Unit = {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current).data(url).build(),
                 imageLoader = rememberEmbedLoader(),
-                contentDescription = null,
+                contentDescription = "Shared image",
                 contentScale = ContentScale.Fit,
                 onSuccess = { st ->
                     val d = st.result.drawable
@@ -2270,7 +2274,7 @@ private fun MediaViewerDialog(url: String, onClose: () -> Unit) {
                 AsyncImage(
                     model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
                     imageLoader = loader,
-                    contentDescription = null,
+                    contentDescription = "Shared image",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxSize()
@@ -2544,7 +2548,8 @@ private fun Composer(
             if (onAttach != null) {
                 Box(
                     Modifier.size(34.dp).clip(CircleShape)
-                        .clickable(enabled = !uploading, onClick = onAttach),
+                        .clickable(enabled = !uploading, onClick = onAttach)
+                        .semantics { contentDescription = "Attach a file"; role = Role.Button },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -2556,7 +2561,8 @@ private fun Composer(
             }
             Box(
                 Modifier.size(34.dp).clip(CircleShape)
-                    .clickable { showFormat = !showFormat },
+                    .clickable { showFormat = !showFormat }
+                    .semantics { contentDescription = "Text formatting"; role = Role.Button },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -2585,7 +2591,8 @@ private fun Composer(
             val canSend = draft.text.isNotBlank()
             Box(
                 Modifier.size(38.dp).clip(CircleShape)
-                    .clickable(enabled = canSend, onClick = onSend),
+                    .clickable(enabled = canSend, onClick = onSend)
+                    .semantics { contentDescription = "Send message"; role = Role.Button },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
