@@ -49,6 +49,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -190,6 +193,13 @@ class MainActivity : ComponentActivity() {
     /** A file arriving via the system share sheet, waiting for a buffer pick. */
     private var sharedUri by mutableStateOf<Uri?>(null)
 
+    /** (networkId, target) to open from a tapped notification, once composed. */
+    private var pendingDeepLink by mutableStateOf<Pair<Int, String>?>(null)
+
+    private val notifPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* declining is fine — the socket + badges still work, just no notifications */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -197,7 +207,16 @@ class MainActivity : ComponentActivity() {
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
         client.start(prefs)
+        Notifier.ensureChannels(this)
+        // Notify only while backgrounded; posts from the WS thread (thread-safe).
+        client.notificationSink = { Notifier.post(applicationContext, it) }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         consumeShareIntent(intent)
+        consumeNotificationIntent(intent)
         setContent {
             LurkerTheme {
                 var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
@@ -205,6 +224,17 @@ class MainActivity : ComponentActivity() {
                 if (!client.loggedIn) {
                     LoginScreen(client, prefs)
                     return@LurkerTheme
+                }
+
+                // A tapped notification opens its buffer once we're logged in.
+                LaunchedEffect(pendingDeepLink) {
+                    pendingDeepLink?.let { (nid, tgt) ->
+                        val buffer = client.focusTarget(nid, tgt)
+                        client.open(buffer)
+                        client.setActive(buffer)
+                        screen = Screen.Chat(buffer)
+                        pendingDeepLink = null
+                    }
                 }
 
                 when (val s = screen) {
@@ -290,6 +320,15 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         consumeShareIntent(intent)
+        consumeNotificationIntent(intent)
+    }
+
+    /** A tapped notification carries the buffer to open; stash it for the UI. */
+    private fun consumeNotificationIntent(intent: Intent?) {
+        val target = intent?.getStringExtra(Notifier.EXTRA_TARGET) ?: return
+        val nid = intent.getIntExtra(Notifier.EXTRA_NETWORK_ID, -1)
+        if (nid >= 0) pendingDeepLink = nid to target
+        intent.removeExtra(Notifier.EXTRA_TARGET) // consume so a config change won't replay
     }
 
     private fun consumeShareIntent(intent: Intent?) {

@@ -66,6 +66,18 @@ data class DccTransfer(
         get() = state in setOf("completed", "failed", "rejected", "cancelled")
 }
 
+/**
+ * A message worth notifying about (a highlight, DM, or notify-always channel),
+ * flattened for the Notifier. [target] is the buffer to open on tap.
+ */
+data class NotifiableEvent(
+    val networkId: Int?,
+    val target: String,
+    val nick: String,
+    val text: String,
+    val isDm: Boolean,
+)
+
 /** One reachable identity (network + nick) for a contact. */
 data class ContactTarget(val networkId: Int, val nick: String, val isPrimary: Boolean = false)
 

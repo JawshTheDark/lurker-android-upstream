@@ -101,6 +101,12 @@ class LurkerClient {
     /** "networkId::nickLower" -> presence state (online/offline/away/back). */
     val presence = mutableStateMapOf<String, String>()
 
+    /** True while the Activity is in the foreground (badge is enough; no notif). */
+    private var appForeground = true
+
+    /** Set by the app: invoked for a notify-worthy message while backgrounded. */
+    var notificationSink: ((NotifiableEvent) -> Unit)? = null
+
     // Channel-list browser (/LIST) state for the currently-viewed network.
     val chanlistRows = mutableStateListOf<ChannelListing>()
     var chanlistLoading by mutableStateOf(false)
@@ -323,6 +329,7 @@ class LurkerClient {
      * gets a presence nudge.
      */
     fun onForeground() {
+        appForeground = true
         if (!loggedIn || token == null) return
         val now = System.currentTimeMillis()
         // Deterministic by design: any real background trip cycles the socket —
@@ -346,6 +353,7 @@ class LurkerClient {
 
     /** Called from the Activity's ON_STOP — remember when we left. */
     fun onBackground() {
+        appForeground = false
         wentBackgroundAt = System.currentTimeMillis()
         activeBuffer?.let { flushDraft(it) } // don't lose an unsynced draft
         ws?.send(presenceFrame(false))
@@ -585,6 +593,11 @@ class LurkerClient {
                 mergeInto(buffer.key, listOf(msg), replace = false)
                 countUnread(buffer.key, frame, msg)
                 if (msg.id > 0) scheduleMarkRead(buffer.key)
+                if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground)) {
+                    notificationSink?.invoke(
+                        NotifiableEvent(buffer.networkId, buffer.target, msg.nick, msg.text, frame.optBoolean("dm")),
+                    )
+                }
             }
 
             "read-state" -> {
@@ -1875,3 +1888,20 @@ class LurkerClient {
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }
 }
+
+/**
+ * Pure decision for whether an incoming message should raise a system
+ * notification. Plain booleans (no Android/JSON deps) so the truth table is
+ * unit-testable. Only notify while backgrounded, for a real inbound message the
+ * server flagged `notify` (its union of highlight / DM / notify-always) that
+ * isn't in the currently-open buffer.
+ */
+internal fun shouldNotify(
+    notify: Boolean,
+    isActiveBuffer: Boolean,
+    self: Boolean,
+    system: Boolean,
+    hasId: Boolean,
+    foreground: Boolean,
+): Boolean =
+    notify && !foreground && !self && !system && hasId && !isActiveBuffer
