@@ -868,20 +868,29 @@ private fun BufferListScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onSearch) {
-                        Text("🔍", fontSize = 17.sp)
+                    // Search is a server-side feature — hidden in direct IRC mode.
+                    if (client.serverFeatures) {
+                        TextButton(onClick = onSearch) { Text("🔍", fontSize = 17.sp) }
                     }
                     TextButton(onClick = { menuOpen = true }) {
                         Text("⋯", color = TextSecondary, fontSize = 22.sp)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(text = { Text("Browse channels (/LIST)") }, onClick = { menuOpen = false; onBrowse() })
+                        // Server-only surfaces (server /LIST cache, server-synced
+                        // contacts, server DCC) don't apply to a raw IRC/bouncer link.
+                        if (client.serverFeatures) {
+                            DropdownMenuItem(text = { Text("Browse channels (/LIST)") }, onClick = { menuOpen = false; onBrowse() })
+                        }
                         DropdownMenuItem(text = { Text("Mark all read") }, onClick = { menuOpen = false; client.markAllRead() })
-                        DropdownMenuItem(text = { Text("Friends") }, onClick = { menuOpen = false; onFriends() })
+                        if (client.serverFeatures) {
+                            DropdownMenuItem(text = { Text("Friends") }, onClick = { menuOpen = false; onFriends() })
+                        }
                         DropdownMenuItem(text = { Text("Ignore list") }, onClick = { menuOpen = false; onIgnores() })
                         DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
-                        DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
+                        if (client.serverFeatures) {
+                            DropdownMenuItem(text = { Text("DCC transfers") }, onClick = { menuOpen = false; onDcc() })
+                        }
                         DropdownMenuItem(text = { Text("Sign out") }, onClick = { menuOpen = false; onSignOut() })
                     }
                 },

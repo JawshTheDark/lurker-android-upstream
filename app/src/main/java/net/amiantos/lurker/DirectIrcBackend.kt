@@ -103,6 +103,15 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
             networks[networkId] = Network(networkId, netName(), client.nick, true)
             connected = networks.values.any { it.connected }
             status = "Connected to ${netName()}"
+            // Always give the network a server buffer — it's the place with a
+            // composer where the user can /join a channel (and it holds server
+            // notices). Without it a fresh network with no channels is a dead end.
+            val server = ensureBuffer(networkId, ":server:$networkId")
+            mergeInto(
+                server.key,
+                listOf(Msg(0, "notice", "*", "Connected to ${netName()} as ${client.nick}. Type /join #channel to join a channel.", self = false, system = true)),
+                replace = false,
+            )
             store.get(networkId)?.channels
                 ?.split(',', ' ')?.map { it.trim() }?.filter { it.isNotEmpty() }
                 ?.forEach { io.execute { runCatching { client.addChannel(it) } } }
