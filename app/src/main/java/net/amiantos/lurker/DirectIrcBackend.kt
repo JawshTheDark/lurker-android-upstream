@@ -13,7 +13,9 @@ import org.kitteh.irc.client.library.event.channel.ChannelNoticeEvent
 import org.kitteh.irc.client.library.event.channel.ChannelPartEvent
 import org.kitteh.irc.client.library.event.channel.ChannelTopicEvent
 import org.kitteh.irc.client.library.event.channel.ChannelUsersUpdatedEvent
+import org.kitteh.irc.client.library.event.capabilities.CapabilitiesSupportedListEvent
 import org.kitteh.irc.client.library.event.client.ClientNegotiationCompleteEvent
+import org.kitteh.irc.client.library.event.client.ClientReceiveCommandEvent
 import org.kitteh.irc.client.library.event.connection.ClientConnectionClosedEvent
 import org.kitteh.irc.client.library.event.user.PrivateMessageEvent
 import org.kitteh.irc.client.library.event.user.PrivateNoticeEvent
@@ -92,6 +94,10 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         return client
     }
 
+    // Stable child networkId per (soju control id, upstream network name).
+    private val sojuChildIds = mutableMapOf<String, Int>()
+    private var nextChildId = 100_000
+
     private fun connectNetwork(net: StoredNet) {
         post {
             networks[net.id] = Network(net.id, net.name, null, false)
@@ -100,7 +106,10 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         io.execute {
             runCatching {
                 val client = buildClient(net)
-                client.eventManager.registerEventListener(Listener(net.id, client))
+                // A type="soju" config with no /network in its username is a soju
+                // control connection — it discovers upstream networks. Children
+                // (type="direct", username user/network) are normal connections.
+                client.eventManager.registerEventListener(Listener(net.id, client, isSojuControl = net.type == "soju"))
                 manager.put(net.id, client)
                 client.connect()
             }.onFailure { e ->
@@ -109,18 +118,63 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         }
     }
 
+    /** Open a per-upstream-network binding on a soju bouncer (username user/network).
+     *  NOTE: soju.im/bouncer-networks discovery is implemented from spec and needs
+     *  verification against a real soju instance. */
+    private fun connectSojuChild(control: StoredNet, soju: SojuNetwork) {
+        val key = "${control.id}/${soju.name}"
+        val childId = sojuChildIds.getOrPut(key) { nextChildId++ }
+        if (manager.get(childId) != null) return // already connected
+        val baseUser = control.username?.ifBlank { null } ?: control.nick
+        val child = control.copy(id = childId, name = soju.name, username = "$baseUser/${soju.name}", type = "direct")
+        post {
+            networks[childId] = Network(childId, soju.name, null, false)
+            if (networkConfigs.none { it.id == childId }) networkConfigs.add(child.toConfig())
+        }
+        connectNetwork(child)
+    }
+
     /** KICL dispatches on Netty threads; every handler hops to the main thread
      *  before touching Compose snapshot state (mirrors LurkerClient.post{}). */
-    private inner class Listener(val networkId: Int, val client: Client) {
+    private inner class Listener(
+        val networkId: Int,
+        val client: Client,
+        val isSojuControl: Boolean = false,
+    ) {
         private fun netName() = networks[networkId]?.name ?: "network"
         private fun buf(target: String) = Buffer(networkId, target, netName())
         private fun myNick() = client.nick
+
+        // soju.im/bouncer-networks: request the cap when the bouncer offers it.
+        @Handler
+        fun onCaps(e: CapabilitiesSupportedListEvent) {
+            if (isSojuControl && e.supportedCapabilities.any { it.name == "soju.im/bouncer-networks" }) {
+                e.addRequest("soju.im/bouncer-networks")
+            }
+        }
+
+        // BOUNCER NETWORK <id> <attrs> — one per upstream network on the bouncer.
+        @Handler
+        fun onBouncer(e: ClientReceiveCommandEvent) {
+            if (!isSojuControl || !e.command.equals("BOUNCER", ignoreCase = true)) return
+            val soju = SojuBouncer.parseNetworkLine(e.parameters) ?: return
+            post {
+                val control = store.get(networkId) ?: return@post
+                if (soju.removed) return@post
+                connectSojuChild(control, soju)
+            }
+        }
 
         @Handler
         fun onReady(e: ClientNegotiationCompleteEvent) = post {
             networks[networkId] = Network(networkId, netName(), client.nick, true)
             connected = networks.values.any { it.connected }
             status = "Connected to ${netName()}"
+            if (isSojuControl) {
+                // Discover the bouncer's upstream networks; each becomes its own row.
+                io.execute { runCatching { client.sendRawLine("BOUNCER LISTNETWORKS") } }
+                return@post
+            }
             // Always give the network a server buffer — it's the place with a
             // composer where the user can /join a channel (and it holds server
             // notices). Without it a fresh network with no channels is a dead end.

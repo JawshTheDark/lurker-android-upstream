@@ -3695,6 +3695,10 @@ private fun NetworkEditScreen(client: LurkerClient, config: NetworkConfig?, onBa
     var saslPassword by remember { mutableStateOf("") }
     var channels by remember { mutableStateOf("") }
     var autoconnect by remember { mutableStateOf(config?.autoconnect ?: true) }
+    // Direct-mode endpoint type: a plain network, or a soju bouncer (which
+    // auto-discovers its upstream networks). Only meaningful in direct mode.
+    val directMode = !client.serverFeatures
+    var endpointType by remember { mutableStateOf("direct") }
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -3746,6 +3750,30 @@ private fun NetworkEditScreen(client: LurkerClient, config: NetworkConfig?, onBa
             if (config == null) {
                 FormField("Channels to join — optional (#a, #b)", channels) { channels = it }
             }
+            if (directMode) {
+                Text("Endpoint type", color = TextSecondary, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("direct" to "Direct network", "soju" to "Soju bouncer").forEach { (v, label) ->
+                        val sel = endpointType == v
+                        Text(
+                            label,
+                            color = if (sel) AccentBlue else TextSecondary,
+                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .background(if (sel) SurfaceRaised else Color.Transparent, RoundedCornerShape(14.dp))
+                                .clickable { endpointType = v }
+                                .padding(12.dp, 8.dp),
+                        )
+                    }
+                }
+                if (endpointType == "soju") {
+                    Text(
+                        "Soju discovers its upstream networks automatically. For other bouncers (ZNC), use Direct and put user/network in the username or SASL account.",
+                        color = TextSecondary, fontSize = 12.sp,
+                    )
+                }
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -3770,6 +3798,7 @@ private fun NetworkEditScreen(client: LurkerClient, config: NetworkConfig?, onBa
                         if (saslPassword.isNotEmpty()) put("sasl_password", saslPassword)
                         if (config == null && channels.isNotBlank()) put("default_channel", channels)
                         put("autoconnect", autoconnect)
+                        if (directMode) put("type", endpointType)
                     }
                     client.saveNetwork(config?.id, fields) { err ->
                         saving = false
