@@ -36,12 +36,30 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
     private val store = DirectNetworkStore(appContext)
     private val manager = KiclManager()
     private val nextMsgId = AtomicLong(1)
+    private val nextIgnoreId = AtomicLong(1)
 
     override fun start(prefs: Prefs) {
         loggedIn = true
         status = "Direct IRC mode"
+        ignores.clear()
+        ignores.addAll(store.loadIgnores())
+        nextIgnoreId.set((ignores.maxOfOrNull { it.id } ?: 0L) + 1L)
         refreshConfigs()
         store.list().filter { it.autoconnect }.forEach { connectNetwork(it) }
+    }
+
+    // Ignores are server-synced in Lurker mode; here they're local + persisted.
+    override fun addIgnore(
+        networkId: Int?, mask: String?, levels: List<String>, isExcept: Boolean,
+        pattern: String?, channels: List<String>?,
+    ) {
+        ignores.add(IgnoreRule(nextIgnoreId.getAndIncrement(), networkId, mask, channels, pattern, "substr", levels, isExcept))
+        store.saveIgnores(ignores.toList())
+    }
+
+    override fun removeIgnore(networkId: Int?, id: Long) {
+        ignores.removeAll { it.id == id }
+        store.saveIgnores(ignores.toList())
     }
 
     private fun refreshConfigs() = post {
@@ -125,27 +143,27 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
         @Handler
         fun onChannelMessage(e: ChannelMessageEvent) =
-            addMessage(networkId, e.channel.name, "message", e.actor.nick, e.message)
+            addMessage(networkId, e.channel.name, "message", e.actor.nick, e.message, mask = e.actor.name)
 
         @Handler
         fun onPrivateMessage(e: PrivateMessageEvent) =
-            addMessage(networkId, e.actor.nick, "message", e.actor.nick, e.message, dm = true)
+            addMessage(networkId, e.actor.nick, "message", e.actor.nick, e.message, dm = true, mask = e.actor.name)
 
         @Handler
         fun onChannelAction(e: ChannelCtcpEvent) {
             val m = e.message
             if (m.startsWith("ACTION ")) {
-                addMessage(networkId, e.channel.name, "action", e.actor.nick, m.removePrefix("ACTION "))
+                addMessage(networkId, e.channel.name, "action", e.actor.nick, m.removePrefix("ACTION "), mask = e.actor.name)
             }
         }
 
         @Handler
         fun onChannelNotice(e: ChannelNoticeEvent) =
-            addMessage(networkId, e.channel.name, "notice", e.actor.nick, e.message)
+            addMessage(networkId, e.channel.name, "notice", e.actor.nick, e.message, mask = e.actor.name)
 
         @Handler
         fun onPrivateNotice(e: PrivateNoticeEvent) =
-            addMessage(networkId, e.actor.nick, "notice", e.actor.nick, e.message, dm = true)
+            addMessage(networkId, e.actor.nick, "notice", e.actor.nick, e.message, dm = true, mask = e.actor.name)
 
         @Handler
         fun onJoin(e: ChannelJoinEvent) = post {
@@ -196,16 +214,26 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
     }
 
     private fun addMessage(
-        networkId: Int, target: String, type: String, nick: String, text: String, dm: Boolean = false,
+        networkId: Int, target: String, type: String, nick: String, text: String,
+        dm: Boolean = false, mask: String = nick,
     ) = post {
-        val b = ensureBuffer(networkId, target)
         val myNick = networks[networkId]?.nick
         val self = nick.equals(myNick, true)
+        // Client-side ignore filtering (Lurker does this server-side). Never drop
+        // our own lines.
+        val ignore = if (self) IgnoreOutcome()
+        else IgnoreMatch.evaluate(ignores, networkId, if (dm) null else target, dm, mask, type, text)
+        if (ignore.drop) return@post
+        val b = ensureBuffer(networkId, target)
         val msg = Msg(nextMsgId.getAndIncrement(), type, nick, text, self = self)
         if (!mergeInto(b.key, listOf(msg), replace = false)) return@post
-        val highlight = dm || (myNick != null && text.contains(myNick, true))
-        countUnread(b.key, JSONObject().put("matched", highlight).put("dm", dm), msg)
-        if (shouldNotify(true, b.key == activeKey, self, msg.system, msg.id > 0, appForeground)) {
+        val highlight = !ignore.suppressHighlight && (dm || (myNick != null && text.contains(myNick, true)))
+        if (!ignore.suppressUnread) {
+            countUnread(b.key, JSONObject().put("matched", highlight).put("dm", dm), msg)
+        }
+        if (!ignore.suppressNotify &&
+            shouldNotify(true, b.key == activeKey, self, msg.system, msg.id > 0, appForeground)
+        ) {
             notificationSink?.invoke(NotifiableEvent(networkId, target, nick, text, dm))
         }
     }

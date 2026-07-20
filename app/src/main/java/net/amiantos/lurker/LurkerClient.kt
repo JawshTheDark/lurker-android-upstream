@@ -1913,7 +1913,7 @@ open class LurkerClient {
     /** Add an ignore rule. [networkId] null = global (every network); empty
      *  [levels] means ALL. e.g. levels=["NOHIGHLIGHT"] ignores only a sender's
      *  highlights without hiding their messages. */
-    fun addIgnore(
+    open fun addIgnore(
         networkId: Int?,
         mask: String?,
         levels: List<String> = listOf("ALL"),
@@ -1936,7 +1936,7 @@ open class LurkerClient {
         )
     }
 
-    fun removeIgnore(networkId: Int?, id: Long) {
+    open fun removeIgnore(networkId: Int?, id: Long) {
         ws?.send(
             JSONObject().put("type", "remove-ignore")
                 .put("networkId", networkId ?: JSONObject.NULL)

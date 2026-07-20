@@ -880,11 +880,7 @@ private fun BufferListScreen(
                         if (client.serverFeatures) {
                             DropdownMenuItem(text = { Text("Friends") }, onClick = { menuOpen = false; onFriends() })
                         }
-                        // Ignore filtering is server-side today (client-side match
-                        // is a direct-mode residual) — hide the list in direct mode.
-                        if (client.serverFeatures) {
-                            DropdownMenuItem(text = { Text("Ignore list") }, onClick = { menuOpen = false; onIgnores() })
-                        }
+                        DropdownMenuItem(text = { Text("Ignore list") }, onClick = { menuOpen = false; onIgnores() })
                         DropdownMenuItem(text = { Text("Networks") }, onClick = { menuOpen = false; onNetworks() })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = { menuOpen = false; onSettings() })
                         if (client.serverFeatures) {

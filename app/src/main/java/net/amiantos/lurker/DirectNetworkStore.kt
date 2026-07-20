@@ -104,6 +104,42 @@ class DirectNetworkStore(context: Context) {
 
     fun delete(id: Int) = save(list().filterNot { it.id == id })
 
+    // ---- Ignore rules (direct mode has no server to sync them) -------------
+    fun loadIgnores(): List<IgnoreRule> {
+        val raw = sp.getString("ignores", null) ?: return emptyList()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            IgnoreRule(
+                id = o.optLong("id"),
+                networkId = if (o.has("networkId")) o.optInt("networkId") else null,
+                mask = o.optString("mask").ifEmpty { null },
+                channels = o.optJSONArray("channels")?.let { c -> (0 until c.length()).map { c.optString(it) } },
+                pattern = o.optString("pattern").ifEmpty { null },
+                patternKind = o.optString("patternKind").ifEmpty { "substr" },
+                levels = o.optJSONArray("levels")?.let { l -> (0 until l.length()).map { l.optString(it) } } ?: emptyList(),
+                isExcept = o.optBoolean("isExcept"),
+            )
+        }
+    }
+
+    fun saveIgnores(rules: List<IgnoreRule>) {
+        val arr = JSONArray()
+        rules.forEach { r ->
+            arr.put(JSONObject().apply {
+                put("id", r.id)
+                r.networkId?.let { put("networkId", it) }
+                r.mask?.let { put("mask", it) }
+                r.channels?.let { put("channels", JSONArray(it)) }
+                r.pattern?.let { put("pattern", it) }
+                put("patternKind", r.patternKind)
+                put("levels", JSONArray(r.levels))
+                put("isExcept", r.isExcept)
+            })
+        }
+        sp.edit { putString("ignores", arr.toString()) }
+    }
+
     fun reorder(ids: List<Int>) {
         val byId = list().associateBy { it.id }
         save(ids.mapNotNull { byId[it] } + list().filter { it.id !in ids })
