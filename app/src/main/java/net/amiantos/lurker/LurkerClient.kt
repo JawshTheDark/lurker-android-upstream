@@ -197,7 +197,7 @@ open class LurkerClient {
     @Volatile private var ws: WebSocket? = null
     private var token: String? = null
     private var baseUrl: String = ""
-    private val networkNames = mutableMapOf<Int, String>()
+    protected val networkNames = mutableMapOf<Int, String>()
 
     private var prefs: Prefs? = null
     protected var activeKey: String? = null

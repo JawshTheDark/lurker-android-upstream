@@ -46,8 +46,23 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         ignores.clear()
         ignores.addAll(store.loadIgnores())
         nextIgnoreId.set((ignores.maxOfOrNull { it.id } ?: 0L) + 1L)
+        // Restore persisted message tails so buffers + history survive a restart
+        // (direct networks have no server-side backlog; a bouncer re-sends its own).
+        store.loadMessages().forEach { pb ->
+            pb.networkId?.let { networkNames[it] = pb.networkName }
+            val b = ensureBuffer(pb.networkId, pb.target)
+            mergeInto(b.key, pb.msgs, replace = true)
+        }
+        nextMsgId.set(maxOf(nextMsgId.get(), (messagesByBuffer.values.flatten().maxOfOrNull { it.id } ?: 0L) + 1L))
         refreshConfigs()
         store.list().filter { it.autoconnect }.forEach { connectNetwork(it) }
+    }
+
+    private fun persistMessages() {
+        val pbs = buffers.filter { it.networkId != null }.map { b ->
+            DirectNetworkStore.PersistedBuffer(b.networkId, b.target, b.networkName, messagesByBuffer[b.key] ?: emptyList())
+        }
+        io.execute { runCatching { store.saveMessages(pbs) } }
     }
 
     // Ignores are server-synced in Lurker mode; here they're local + persisted.
@@ -68,8 +83,9 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         networkConfigs.clear()
         networkConfigs.addAll(store.list().map { it.toConfig() })
         // Seed a network row (disconnected) for each config so the sidebar shows it
-        // even before it connects.
+        // even before it connects, and record its name so buffers group under it.
         store.list().forEach { n ->
+            networkNames[n.id] = n.name
             if (networks[n.id] == null) networks[n.id] = Network(n.id, n.name, null, false)
         }
     }
@@ -128,6 +144,7 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         val baseUser = control.username?.ifBlank { null } ?: control.nick
         val child = control.copy(id = childId, name = soju.name, username = "$baseUser/${soju.name}", type = "direct")
         post {
+            networkNames[childId] = soju.name
             networks[childId] = Network(childId, soju.name, null, false)
             if (networkConfigs.none { it.id == childId }) networkConfigs.add(child.toConfig())
         }
@@ -340,7 +357,10 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         store.list().filter { it.autoconnect && manager.get(it.id) == null }.forEach { connectNetwork(it) }
     }
 
-    override fun onBackground() { appForeground = false }
+    override fun onBackground() {
+        appForeground = false
+        persistMessages()
+    }
 
     override fun signOut() {
         manager.shutdownAll()

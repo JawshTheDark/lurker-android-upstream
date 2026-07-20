@@ -123,6 +123,55 @@ class DirectNetworkStore(context: Context) {
         }
     }
 
+    // ---- Message tail persistence (offline history for direct mode) --------
+    /** One buffer's recent tail, enough to recreate the sidebar + a page of chat. */
+    data class PersistedBuffer(val networkId: Int?, val target: String, val networkName: String, val msgs: List<Msg>)
+
+    fun saveMessages(buffers: List<PersistedBuffer>, tailPerBuffer: Int = 80) {
+        val arr = JSONArray()
+        buffers.forEach { b ->
+            val m = JSONArray()
+            b.msgs.takeLast(tailPerBuffer).forEach { msg ->
+                m.put(JSONObject().apply {
+                    put("id", msg.id); put("type", msg.type); put("nick", msg.nick)
+                    put("text", msg.text); put("self", msg.self); put("system", msg.system)
+                    msg.time?.let { put("time", it) }
+                    msg.level?.let { put("level", it) }
+                    put("e2e", msg.e2e)
+                })
+            }
+            arr.put(JSONObject().apply {
+                b.networkId?.let { put("networkId", it) }
+                put("target", b.target); put("networkName", b.networkName); put("msgs", m)
+            })
+        }
+        sp.edit { putString("messages", arr.toString()) }
+    }
+
+    fun loadMessages(): List<PersistedBuffer> {
+        val raw = sp.getString("messages", null) ?: return emptyList()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val ms = o.optJSONArray("msgs") ?: JSONArray()
+            val msgs = (0 until ms.length()).mapNotNull { j ->
+                val m = ms.optJSONObject(j) ?: return@mapNotNull null
+                Msg(
+                    id = m.optLong("id"), type = m.optString("type"), nick = m.optString("nick"),
+                    text = m.optString("text"), self = m.optBoolean("self"),
+                    time = m.optString("time").ifEmpty { null }, system = m.optBoolean("system"),
+                    level = m.optString("level").ifEmpty { null }, e2e = m.optBoolean("e2e"),
+                )
+            }
+            PersistedBuffer(
+                networkId = if (o.has("networkId")) o.optInt("networkId") else null,
+                target = o.optString("target"),
+                networkName = o.optString("networkName"),
+                msgs = msgs,
+            )
+        }
+    }
+
     fun saveIgnores(rules: List<IgnoreRule>) {
         val arr = JSONArray()
         rules.forEach { r ->
