@@ -84,6 +84,19 @@ android {
     buildFeatures {
         compose = true
     }
+    // KICL pulls Netty, which ships duplicated META-INF entries that break the
+    // APK merge unless excluded. (Direct-IRC-mode spike / Phase 0.)
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/io.netty.versions.properties",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE.txt",
+                "META-INF/DEPENDENCIES",
+            )
+        }
+    }
 }
 
 dependencies {
@@ -105,6 +118,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment)
+    // Direct-IRC-mode engine (Phase 0 spike → Direct backend). Netty-based; see
+    // packaging{} excludes above.
+    implementation("org.kitteh.irc:client-lib:9.0.0")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
