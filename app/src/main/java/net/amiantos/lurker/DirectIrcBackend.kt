@@ -257,8 +257,12 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
         private fun rebuildRoster(channel: String) {
             val ch = client.getChannel(channel).orElse(null) ?: return
-            members["$networkId::$channel"] =
-                ch.nicknames.map { Member(it, emptyList(), false, null) }.sortedBy { it.nick.lowercase() }
+            val roster = ch.users.map { u ->
+                val modes = ch.getUserModes(u).orElse(null)?.map { it.char.toString() } ?: emptyList()
+                Member(u.nick, modes, away = false, host = u.host)
+            }
+            // Op/voice first (Member.rank), then alphabetical — same as Lurker mode.
+            members["$networkId::$channel"] = roster.sortedWith(compareBy({ it.rank }, { it.nick.lowercase() }))
         }
 
         private fun sysLine(target: String, text: String) {
@@ -328,7 +332,14 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
     override fun open(buffer: Buffer) {} // no server history to hydrate; buffer is local
 
-    override fun onForeground() { appForeground = true }
+    override fun onForeground() {
+        appForeground = true
+        // Recover any autoconnect network whose connection was lost (e.g. dropped
+        // while backgrounded, or a Wi-Fi↔cellular switch). Only where we hold no
+        // live client, to avoid racing KICL's own reconnection.
+        store.list().filter { it.autoconnect && manager.get(it.id) == null }.forEach { connectNetwork(it) }
+    }
+
     override fun onBackground() { appForeground = false }
 
     override fun signOut() {
