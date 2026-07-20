@@ -3,7 +3,10 @@
 package net.amiantos.lurker
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.core.content.edit
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -43,7 +46,25 @@ data class StoredNet(
  * Keystore is a noted hardening residual.
  */
 class DirectNetworkStore(context: Context) {
-    private val sp = context.applicationContext.getSharedPreferences("lurker_direct", Context.MODE_PRIVATE)
+    private val sp = encryptedPrefs(context) ?: context.applicationContext
+        .getSharedPreferences("lurker_direct", Context.MODE_PRIVATE)
+
+    private companion object {
+        /** AES-256 encrypted prefs for the secrets. security-crypto is alpha and
+         *  can throw if the Keystore master key is unavailable/corrupt — fall back
+         *  to plaintext prefs so direct mode still works (a noted tradeoff). */
+        fun encryptedPrefs(context: Context): SharedPreferences? = try {
+            val ctx = context.applicationContext
+            val key = MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+            EncryptedSharedPreferences.create(
+                ctx, "lurker_direct_enc", key,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     fun list(): List<StoredNet> {
         val raw = sp.getString("networks", null) ?: return emptyList()

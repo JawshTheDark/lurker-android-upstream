@@ -100,6 +100,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.withStyle
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -477,13 +478,7 @@ class MainActivity : FragmentActivity() {
 
     /** Relaunch the app in a fresh process so LurkerApp re-creates its lazy
      *  [LurkerClient] for the newly-chosen clientMode (mode switch = restart). */
-    private fun restartApp() {
-        val intent = packageManager.getLaunchIntentForPackage(packageName)
-            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-        startActivity(intent)
-        finish()
-        Runtime.getRuntime().exit(0)
-    }
+    private fun restartApp() = restartAppProcess(this)
 
     /** A tapped notification carries the buffer to open; stash it for the UI. */
     private fun consumeNotificationIntent(intent: Intent?) {
@@ -3126,6 +3121,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
                 item { BackgroundConnectCard(prefs) }
+                item { ConnectionModeCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
                 if (client.serverExtended) item { AliasesCard(client) }
                 items(orderedCategories.size) { i ->
@@ -3382,6 +3378,55 @@ private fun BackgroundConnectCard(prefs: Prefs) {
         prefs.backgroundConnect = it
         if (it) LurkerConnectionService.start(context) else LurkerConnectionService.stop(context)
     }
+}
+
+/** Switch between Lurker-server and direct-IRC/bouncer mode. Applying the switch
+ *  restarts the app so LurkerApp rebuilds its lazy backend for the new mode. */
+@Composable
+private fun ConnectionModeCard(prefs: Prefs) {
+    val context = LocalContext.current
+    val mode = prefs.clientMode ?: "lurker"
+    val isDirect = mode == "direct"
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.padding(16.dp, 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Connection mode", fontSize = 17.sp)
+            Text(
+                if (isDirect) "Direct IRC / bouncer" else "Lurker server",
+                color = TextSecondary, fontSize = 13.sp,
+            )
+            Text(
+                "Switch restarts the app. " +
+                    if (isDirect) "Switching to Lurker signs you into a Lurker server."
+                    else "Switching to Direct connects straight to IRC / a bouncer.",
+                color = TextSecondary, fontSize = 12.sp,
+            )
+            Surface(
+                onClick = { prefs.clientMode = if (isDirect) "lurker" else "direct"; restartAppProcess(context) },
+                shape = RoundedCornerShape(10.dp),
+                color = SurfaceRaised,
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                Text(
+                    if (isDirect) "Switch to Lurker server" else "Switch to Direct IRC / bouncer",
+                    color = AccentBlue, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(14.dp, 10.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Relaunch the app in a fresh process (mode switch = restart). */
+private fun restartAppProcess(context: Context) {
+    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    context.startActivity(intent)
+    Runtime.getRuntime().exit(0)
 }
 
 @Composable

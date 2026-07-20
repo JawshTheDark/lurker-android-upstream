@@ -121,6 +121,8 @@ dependencies {
     // Direct-IRC-mode engine (Phase 0 spike → Direct backend). Netty-based; see
     // packaging{} excludes above.
     implementation("org.kitteh.irc:client-lib:9.0.0")
+    // Encrypt direct-mode IRC/SASL secrets at rest (with a plaintext fallback).
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
