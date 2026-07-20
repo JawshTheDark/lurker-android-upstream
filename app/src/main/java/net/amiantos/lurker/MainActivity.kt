@@ -239,7 +239,11 @@ class MainActivity : FragmentActivity() {
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
         Ui.chatTextScale = prefs.chatTextScale
-        client.start(prefs)
+        // Don't start a backend until a mode is settled. Existing users have a
+        // saved Lurker session (clientMode still null on first update) — treat them
+        // as Lurker mode and start immediately; only a genuinely fresh install
+        // (no mode, no session) waits for the ModePicker.
+        if (prefs.clientMode != null || prefs.hasSession) client.start(prefs)
         Notifier.ensureChannels(this)
         // Notify only while backgrounded; posts from the WS thread (thread-safe).
         client.notificationSink = { Notifier.post(applicationContext, it) }
@@ -275,6 +279,16 @@ class MainActivity : FragmentActivity() {
                     return@LurkerTheme
                 }
 
+                // First run: choose Lurker-server mode or direct-IRC/bouncer mode.
+                // The chosen backend is picked in LurkerApp by clientMode, and the
+                // client is created lazily, so applying a choice restarts the app.
+                // Only genuinely fresh installs see the picker — an existing Lurker
+                // session means clientMode is effectively "lurker".
+                if (prefs.clientMode == null && !prefs.hasSession) {
+                    ModePickerScreen(onPick = { mode -> prefs.clientMode = mode; restartApp() })
+                    return@LurkerTheme
+                }
+
                 if (!client.loggedIn) {
                     LoginScreen(client, prefs)
                     return@LurkerTheme
@@ -299,6 +313,15 @@ class MainActivity : FragmentActivity() {
                         client.setActive(buffer)
                         screen = Screen.Chat(buffer)
                         client.pendingOpen = null
+                    }
+                }
+
+                // Direct mode with nothing configured yet: drop the user on the
+                // Networks screen to add their first IRC network / bouncer.
+                LaunchedEffect(prefs.clientMode) {
+                    if (prefs.clientMode == "direct" && client.networkConfigs.isEmpty()) {
+                        client.loadNetworkConfigs()
+                        if (client.networkConfigs.isEmpty()) screen = Screen.Networks
                     }
                 }
 
@@ -450,6 +473,16 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         consumeShareIntent(intent)
         consumeNotificationIntent(intent)
+    }
+
+    /** Relaunch the app in a fresh process so LurkerApp re-creates its lazy
+     *  [LurkerClient] for the newly-chosen clientMode (mode switch = restart). */
+    private fun restartApp() {
+        val intent = packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        startActivity(intent)
+        finish()
+        Runtime.getRuntime().exit(0)
     }
 
     /** A tapped notification carries the buffer to open; stash it for the UI. */
@@ -717,6 +750,50 @@ private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
             ) { Text("Sign in") }
 
             client.status?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+    }
+}
+
+@Composable
+private fun ModePickerScreen(onPick: (String) -> Unit) {
+    Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
+        Column(
+            modifier = Modifier.padding(padding).padding(24.dp).fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Spacer(Modifier.height(24.dp))
+            Text("How do you want to connect?", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "You can change this later in Settings (it restarts the app).",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(8.dp))
+            ModeCard(
+                title = "Lurker server",
+                body = "Connect to a Lurker instance (always-on, history & sync, push). Best experience — needs a Lurker account.",
+                onClick = { onPick("lurker") },
+            )
+            ModeCard(
+                title = "Direct IRC / bouncer",
+                body = "Connect straight to IRC networks, or to a bouncer (soju, ZNC). No Lurker needed. Note: without a bouncer, a phone can't stay connected in the background.",
+                onClick = { onPick("direct") },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModeCard(title: String, body: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = SurfaceDark,
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(body, color = TextSecondary, fontSize = 13.sp)
         }
     }
 }

@@ -19,55 +19,75 @@ import org.kitteh.irc.client.library.event.user.PrivateMessageEvent
 import org.kitteh.irc.client.library.event.user.PrivateNoticeEvent
 import org.kitteh.irc.client.library.event.user.UserNickChangeEvent
 import org.kitteh.irc.client.library.event.user.UserQuitEvent
+import org.kitteh.irc.client.library.feature.auth.SaslPlain
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Direct-IRC / bouncer backend. Subclasses [LurkerClient] so it inherits all the
- * observable Compose state + the buffer/roster/unread helpers verbatim, and only
- * overrides the transport methods to speak raw IRC (via KICL) instead of the
- * Lurker WebSocket. A bouncer (soju/ZNC) is just an IRC server here.
- *
- * PHASE 2: one hardcoded network, channel + private messages in/out, buffer
- * creation, basic system lines. SASL / multi-network / per-server config UI /
- * first-class soju bouncer-networks come in later phases. This is the pragmatic
- * subclass path (see the plan's "residual: promote to a clean interface").
+ * Direct-IRC / bouncer backend. Subclasses [LurkerClient] to inherit all the
+ * observable Compose state + buffer/roster/unread helpers, overriding only the
+ * transport methods to speak raw IRC (via KICL). A bouncer (soju/ZNC) is just an
+ * IRC server here — bind one upstream network with `user/network` in the
+ * username/SASL field.
  */
-class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
+class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
     override val serverFeatures: Boolean get() = false
 
+    private val store = DirectNetworkStore(appContext)
     private val manager = KiclManager()
     private val nextMsgId = AtomicLong(1)
 
-    // Phase 2: one hardcoded network so we can prove read+send on-device. Phase 4
-    // replaces this with the encrypted DirectNetworkStore + NetworkEditScreen.
-    private val demoNetworkId = 1
-
     override fun start(prefs: Prefs) {
-        // No account/login concept in direct mode — we're "signed in" as soon as
-        // the app opens; connections are per-configured-network.
         loggedIn = true
         status = "Direct IRC mode"
-        connectDemoNetwork()
+        refreshConfigs()
+        store.list().filter { it.autoconnect }.forEach { connectNetwork(it) }
     }
 
-    private fun connectDemoNetwork() {
-        val nick = "spooky${System.currentTimeMillis() % 1000}"
-        post { networks[demoNetworkId] = Network(demoNetworkId, "Libera.Chat", nick, false) }
-        // KICL's build()/connect() does DNS + socket work — never on the main thread.
+    private fun refreshConfigs() = post {
+        networkConfigs.clear()
+        networkConfigs.addAll(store.list().map { it.toConfig() })
+        // Seed a network row (disconnected) for each config so the sidebar shows it
+        // even before it connects.
+        store.list().forEach { n ->
+            if (networks[n.id] == null) networks[n.id] = Network(n.id, n.name, null, false)
+        }
+    }
+
+    private fun buildClient(net: StoredNet): Client {
+        val server = Client.builder()
+            .nick(net.nick)
+            .user(net.username?.ifBlank { null } ?: net.nick)
+            .realName(net.realname ?: net.nick)
+            .server()
+            .host(net.host)
+            .port(
+                net.port,
+                if (net.tls) Client.Builder.Server.SecurityType.SECURE
+                else Client.Builder.Server.SecurityType.INSECURE,
+            )
+        net.serverPassword?.let { server.password(it) }
+        val client = server.then().build()
+        if (!net.saslAccount.isNullOrEmpty() && !net.saslPassword.isNullOrEmpty()) {
+            client.authManager.addProtocol(SaslPlain(client, net.saslAccount, net.saslPassword))
+        }
+        return client
+    }
+
+    private fun connectNetwork(net: StoredNet) {
+        post {
+            networks[net.id] = Network(net.id, net.name, null, false)
+            status = "Connecting to ${net.name}…"
+        }
         io.execute {
-            val client = Client.builder()
-                .nick(nick)
-                .user("spooky")
-                .realName("Spooky (direct mode)")
-                .server()
-                .host("irc.libera.chat")
-                .port(6697, Client.Builder.Server.SecurityType.SECURE)
-                .then()
-                .build()
-            client.eventManager.registerEventListener(Listener(demoNetworkId, client))
-            manager.put(demoNetworkId, client)
-            client.connect()
+            runCatching {
+                val client = buildClient(net)
+                client.eventManager.registerEventListener(Listener(net.id, client))
+                manager.put(net.id, client)
+                client.connect()
+            }.onFailure { e ->
+                post { status = "Couldn't connect to ${net.name}: ${e.message}" }
+            }
         }
     }
 
@@ -81,10 +101,11 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
         @Handler
         fun onReady(e: ClientNegotiationCompleteEvent) = post {
             networks[networkId] = Network(networkId, netName(), client.nick, true)
-            connected = true
+            connected = networks.values.any { it.connected }
             status = "Connected to ${netName()}"
-            // Phase 2 demo autojoin.
-            client.addChannel("#lurker")
+            store.get(networkId)?.channels
+                ?.split(',', ' ')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?.forEach { io.execute { runCatching { client.addChannel(it) } } }
         }
 
         @Handler
@@ -95,34 +116,35 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
 
         @Handler
         fun onChannelMessage(e: ChannelMessageEvent) =
-            addMessage(e.channel.name, "message", e.actor.nick, e.message)
+            addMessage(networkId, e.channel.name, "message", e.actor.nick, e.message)
 
         @Handler
         fun onPrivateMessage(e: PrivateMessageEvent) =
-            addMessage(e.actor.nick, "message", e.actor.nick, e.message, dm = true)
+            addMessage(networkId, e.actor.nick, "message", e.actor.nick, e.message, dm = true)
 
         @Handler
         fun onChannelAction(e: ChannelCtcpEvent) {
             val m = e.message
-            if (m.startsWith("ACTION ")) addMessage(e.channel.name, "action", e.actor.nick, m.removePrefix("ACTION "))
+            if (m.startsWith("ACTION ")) {
+                addMessage(networkId, e.channel.name, "action", e.actor.nick, m.removePrefix("ACTION "))
+            }
         }
 
         @Handler
         fun onChannelNotice(e: ChannelNoticeEvent) =
-            addMessage(e.channel.name, "notice", e.actor.nick, e.message)
+            addMessage(networkId, e.channel.name, "notice", e.actor.nick, e.message)
 
         @Handler
         fun onPrivateNotice(e: PrivateNoticeEvent) =
-            addMessage(e.actor.nick, "notice", e.actor.nick, e.message, dm = true)
+            addMessage(networkId, e.actor.nick, "notice", e.actor.nick, e.message, dm = true)
 
         @Handler
         fun onJoin(e: ChannelJoinEvent) = post {
-            val b = buf(e.channel.name)
             ensureBuffer(networkId, e.channel.name)
             rebuildRoster(e.channel.name)
             if (e.user.nick.equals(myNick(), true)) {
                 noteJoinRequest(networkId, e.channel.name)
-                pendingOpen = b
+                pendingOpen = buf(e.channel.name)
             } else {
                 sysLine(e.channel.name, "${e.user.nick} joined")
             }
@@ -136,17 +158,12 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
 
         @Handler
         fun onQuit(e: UserQuitEvent) = post {
-            // Post a quit line into every channel we shared with them.
-            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
-                rebuildRoster(b.target)
-            }
+            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { rebuildRoster(it.target) }
         }
 
         @Handler
         fun onNick(e: UserNickChangeEvent) = post {
-            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
-                rebuildRoster(b.target)
-            }
+            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { rebuildRoster(it.target) }
         }
 
         @Handler
@@ -159,27 +176,28 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
 
         private fun rebuildRoster(channel: String) {
             val ch = client.getChannel(channel).orElse(null) ?: return
-            val roster = ch.nicknames.map { Member(nick = it, modes = emptyList(), away = false, host = null) }
-            members["$networkId::$channel"] = roster.sortedBy { it.nick.lowercase() }
+            members["$networkId::$channel"] =
+                ch.nicknames.map { Member(it, emptyList(), false, null) }.sortedBy { it.nick.lowercase() }
         }
 
-        private fun sysLine(target: String, text: String) = post {
+        private fun sysLine(target: String, text: String) {
             val b = ensureBuffer(networkId, target)
             mergeInto(b.key, listOf(Msg(0, "system", "*", text, self = false, system = true)), replace = false)
         }
     }
 
-    private fun addMessage(target: String, type: String, nick: String, text: String, dm: Boolean = false) = post {
-        val b = ensureBuffer(demoNetworkId, target)
-        val myNick = networks[demoNetworkId]?.nick
+    private fun addMessage(
+        networkId: Int, target: String, type: String, nick: String, text: String, dm: Boolean = false,
+    ) = post {
+        val b = ensureBuffer(networkId, target)
+        val myNick = networks[networkId]?.nick
         val self = nick.equals(myNick, true)
         val msg = Msg(nextMsgId.getAndIncrement(), type, nick, text, self = self)
         if (!mergeInto(b.key, listOf(msg), replace = false)) return@post
         val highlight = dm || (myNick != null && text.contains(myNick, true))
-        val frame = JSONObject().put("matched", highlight).put("dm", dm)
-        countUnread(b.key, frame, msg)
+        countUnread(b.key, JSONObject().put("matched", highlight).put("dm", dm), msg)
         if (shouldNotify(true, b.key == activeKey, self, msg.system, msg.id > 0, appForeground)) {
-            notificationSink?.invoke(NotifiableEvent(demoNetworkId, target, nick, text, dm))
+            notificationSink?.invoke(NotifiableEvent(networkId, target, nick, text, dm))
         }
     }
 
@@ -199,7 +217,7 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
                 }
                 "notice" -> client.sendNotice(op.target ?: buffer.target, op.text ?: "")
                 "raw" -> client.sendRawLine(op.line ?: "")
-                "join" -> op.channel?.let { client.addChannel(it) }
+                "join" -> op.channel?.let { ch -> io.execute { runCatching { client.addChannel(ch) } } }
                 "part" -> client.getChannel(op.target ?: buffer.target).ifPresent { it.part(op.reason ?: "") }
                 "close" -> {
                     client.getChannel(buffer.target).ifPresent { it.part("") }
@@ -211,14 +229,13 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
         }
     }
 
-    /** No echo-message cap yet (Phase 3) → optimistically append our own line. */
+    /** No echo-message cap yet → optimistically append our own line. */
     private fun echoSelf(buffer: Buffer, type: String, text: String) = post {
         val nick = networks[buffer.networkId]?.nick ?: "me"
         mergeInto(buffer.key, listOf(Msg(nextMsgId.getAndIncrement(), type, nick, text, self = true)), replace = false)
     }
 
-    // Direct mode has no server history to hydrate; the buffer is already local.
-    override fun open(buffer: Buffer) {}
+    override fun open(buffer: Buffer) {} // no server history to hydrate; buffer is local
 
     override fun onForeground() { appForeground = true }
     override fun onBackground() { appForeground = false }
@@ -227,6 +244,50 @@ class DirectIrcBackend(private val appContext: Context) : LurkerClient() {
         manager.shutdownAll()
         super.signOut()
     }
+
+    // ---- Network CRUD -> local store + KiclManager ------------------------
+    override fun loadNetworkConfigs() { refreshConfigs() }
+
+    override fun saveNetwork(id: Int?, fields: Map<String, Any?>, onDone: (String?) -> Unit) {
+        val newId = store.upsert(id, fields)
+        refreshConfigs()
+        // (Re)connect if it should be live.
+        store.get(newId)?.let { net ->
+            if (net.autoconnect || manager.get(newId) != null) {
+                manager.shutdown(newId)
+                connectNetwork(net)
+            }
+        }
+        post { onDone(null) }
+    }
+
+    override fun deleteNetwork(id: Int, onDone: (String?) -> Unit) {
+        manager.shutdown(id)
+        store.delete(id)
+        post {
+            networks.remove(id)
+            buffers.removeAll { it.networkId == id }
+            refreshConfigs()
+            onDone(null)
+        }
+    }
+
+    override fun networkAction(id: Int, action: String) {
+        val net = store.get(id) ?: return
+        when (action) {
+            "connect" -> connectNetwork(net)
+            "disconnect" -> {
+                manager.shutdown(id)
+                post { networks[id]?.let { networks[id] = it.copy(connected = false) } }
+            }
+            "reconnect" -> { manager.shutdown(id); connectNetwork(net) }
+        }
+    }
+
+    override fun reorderNetworks(ids: List<Int>) {
+        store.reorder(ids)
+        refreshConfigs()
+    }
 }
 
 /** Holds the live KICL clients keyed by local networkId. */
@@ -234,5 +295,6 @@ class KiclManager {
     private val clients = mutableMapOf<Int, Client>()
     fun put(id: Int, client: Client) { clients[id] = client }
     fun get(id: Int): Client? = clients[id]
+    fun shutdown(id: Int) { clients.remove(id)?.let { runCatching { it.shutdown() } } }
     fun shutdownAll() { clients.values.forEach { runCatching { it.shutdown() } }; clients.clear() }
 }

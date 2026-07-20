@@ -37,7 +37,9 @@ class Prefs(context: Context) {
      *  (raw IRC / bouncer via KICL). null = first run → mode picker. */
     var clientMode: String?
         get() = sp.getString("clientMode", null)
-        set(value) = sp.edit { putString("clientMode", value) }
+        // commit synchronously — the mode picker kills the process right after
+        // setting this, and an async apply() would be lost before it flushes.
+        set(value) = sp.edit(commit = true) { putString("clientMode", value) }
 
     /** Selected app theme id ("light" | "dark" | "oled"); null = default. */
     var theme: String?
