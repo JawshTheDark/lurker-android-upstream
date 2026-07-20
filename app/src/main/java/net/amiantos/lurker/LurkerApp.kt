@@ -22,7 +22,12 @@ import coil.disk.DiskCache
  * relaunches — and there's a single DiskCache per directory (Coil forbids more).
  */
 class LurkerApp : Application(), ImageLoaderFactory {
-    val client: LurkerClient by lazy { LurkerClient() }
+    // Lurker-server mode (default) or direct-IRC/bouncer mode, chosen by the
+    // persisted clientMode. Lazy, so the mode must be set before first access —
+    // the first-run ModePicker sets it (Phase 4). Switching modes = app restart.
+    val client: LurkerClient by lazy {
+        if (Prefs(this).clientMode == "direct") DirectIrcBackend(this) else LurkerClient()
+    }
 
     // Biometric-lock state kept here (not in the Activity) so it survives Activity
     // recreation — rotating the screen shouldn't re-prompt. backgroundedAt lets

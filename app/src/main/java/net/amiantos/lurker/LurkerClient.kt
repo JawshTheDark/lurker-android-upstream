@@ -37,14 +37,19 @@ import java.util.concurrent.TimeUnit
  * native client this size; lurker#492's transport-adapter seam is the next step
  * if it grows further.
  */
-class LurkerClient {
+open class LurkerClient {
+    /** True for the Lurker-server backend; DirectIrcBackend overrides to false to
+     *  hide server-only surfaces (search, highlights, DCC, settings registry,
+     *  uploads) that have no meaning on a raw IRC / bouncer connection. */
+    open val serverFeatures: Boolean get() = true
+
     // ---- Observable state -------------------------------------------------
     var status by mutableStateOf<String?>(null)
-        private set
+        protected set
     var loggedIn by mutableStateOf(false)
-        private set
+        protected set
     var connected by mutableStateOf(false)
-        private set
+        protected set
 
     val networks = mutableStateMapOf<Int, Network>()
     val buffers = mutableStateListOf<Buffer>()
@@ -110,10 +115,10 @@ class LurkerClient {
 
     /** networkId -> (requested channel, requestedAt) for a user join, so the real
      *  channel-joined can retarget focus + drop the ghost requested buffer. */
-    private val pendingJoin = mutableMapOf<Int, Pair<String, Long>>()
+    protected val pendingJoin = mutableMapOf<Int, Pair<String, Long>>()
 
     /** True while the Activity is in the foreground (badge is enough; no notif). */
-    private var appForeground = true
+    protected var appForeground = true
 
     /** Guards [start] so a recreated Activity doesn't cycle the socket. */
     private var started = false
@@ -185,8 +190,8 @@ class LurkerClient {
         .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
-    private val main = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
+    protected val main = Handler(Looper.getMainLooper())
+    protected val io = Executors.newSingleThreadExecutor()
     private val json = "application/json; charset=utf-8".toMediaType()
 
     @Volatile private var ws: WebSocket? = null
@@ -195,7 +200,7 @@ class LurkerClient {
     private val networkNames = mutableMapOf<Int, String>()
 
     private var prefs: Prefs? = null
-    private var activeKey: String? = null
+    protected var activeKey: String? = null
 
     /** Highest server message id seen — the `?since=` cursor on reconnect. */
     private var maxMessageId = 0L
@@ -213,7 +218,7 @@ class LurkerClient {
     /** When the app went to background (0 while foregrounded). */
     private var wentBackgroundAt = 0L
 
-    private fun post(block: () -> Unit) = main.post(block)
+    protected fun post(block: () -> Unit) = main.post(block)
 
     // ---- Session lifecycle ------------------------------------------------
 
@@ -221,7 +226,7 @@ class LurkerClient {
      * Wire up persistence and, if a saved session exists, connect straight away
      * without a sign-in screen. Called once from the Activity.
      */
-    fun start(prefs: Prefs) {
+    open fun start(prefs: Prefs) {
         // Idempotent: the client is process-scoped now, so a recreated Activity
         // (rotation, layout switch) calls start() again — don't cycle the socket.
         if (started) { this.prefs = prefs; return }
@@ -275,7 +280,7 @@ class LurkerClient {
     }
 
     /** Tear down the session: close the socket, forget the token, reset state. */
-    fun signOut() {
+    open fun signOut() {
         intentionalClose = true
         started = false
         ws?.close(1000, "sign out")
@@ -381,7 +386,7 @@ class LurkerClient {
      * `?since=` resume is cheap, a zombie socket is not. A healthy socket just
      * gets a presence nudge.
      */
-    fun onForeground() {
+    open fun onForeground() {
         appForeground = true
         if (!loggedIn || token == null) return
         val now = System.currentTimeMillis()
@@ -405,7 +410,7 @@ class LurkerClient {
     }
 
     /** Called from the Activity's ON_STOP — remember when we left. */
-    fun onBackground() {
+    open fun onBackground() {
         appForeground = false
         wentBackgroundAt = System.currentTimeMillis()
         activeBuffer?.let { flushDraft(it) } // don't lose an unsynced draft
@@ -459,7 +464,7 @@ class LurkerClient {
     }
 
     /** Persist a full network ordering (must contain every network id). */
-    fun reorderNetworks(ids: List<Int>) = io.execute {
+    open fun reorderNetworks(ids: List<Int>) = io.execute {
         try {
             val body = JSONObject().put("ids", org.json.JSONArray(ids)).toString().toRequestBody(json)
             http.newCall(authed("/api/networks/reorder").post(body).build()).execute().use { res ->
@@ -953,7 +958,7 @@ class LurkerClient {
 
     // ---- Channel members ----------------------------------------------------
 
-    private fun parseMembers(arr: JSONArray): List<Member> =
+    protected fun parseMembers(arr: JSONArray): List<Member> =
         (0 until arr.length()).mapNotNull { i ->
             val m = arr.optJSONObject(i) ?: return@mapNotNull null
             val nick = m.optString("nick")
@@ -973,7 +978,7 @@ class LurkerClient {
      * join/part/quit/kick/nick stream is applied incrementally (the server does
      * NOT re-send names for those — mirrors the web client's store).
      */
-    private fun applyMemberEvent(key: String, frame: JSONObject) {
+    protected fun applyMemberEvent(key: String, frame: JSONObject) {
         when (frame.optString("type")) {
             "names" -> frame.optJSONArray("members")?.let { members[key] = parseMembers(it) }
             "join" -> {
@@ -1108,7 +1113,7 @@ class LurkerClient {
         }
     }
 
-    private fun removeMember(key: String, nick: String) {
+    protected fun removeMember(key: String, nick: String) {
         if (nick.isEmpty()) return
         members[key]?.let { cur -> members[key] = cur.filterNot { it.nick.equals(nick, true) } }
     }
@@ -1119,7 +1124,7 @@ class LurkerClient {
         return members[buffer.key]?.firstOrNull { it.nick.equals(nick, true) }
     }
 
-    private fun bumpCursor(id: Long) {
+    protected fun bumpCursor(id: Long) {
         if (id > maxMessageId) maxMessageId = id
     }
 
@@ -1130,7 +1135,7 @@ class LurkerClient {
         }
     }
 
-    private fun ensureBuffer(networkId: Int?, target: String): Buffer {
+    protected fun ensureBuffer(networkId: Int?, target: String): Buffer {
         val key = "${networkId ?: "sys"}::$target"
         buffers.firstOrNull { it.key == key }?.let { return it }
         val buffer = Buffer(
@@ -1144,7 +1149,7 @@ class LurkerClient {
 
     /** Returns whether anything was actually added (false = every id was a dup),
      *  so the live path can avoid double-counting a re-delivered message. */
-    private fun mergeInto(key: String, newMsgs: List<Msg>, replace: Boolean): Boolean {
+    protected fun mergeInto(key: String, newMsgs: List<Msg>, replace: Boolean): Boolean {
         if (replace) {
             messagesByBuffer[key] = newMsgs
             return true
@@ -1161,17 +1166,17 @@ class LurkerClient {
         return true
     }
 
-    private fun ensureOrdered(msgs: List<Msg>): List<Msg> = orderMessagesById(msgs)
+    protected fun ensureOrdered(msgs: List<Msg>): List<Msg> = orderMessagesById(msgs)
 
     // ---- Unread accounting ------------------------------------------------
 
-    private fun seedUnread(key: String, frame: JSONObject) {
+    protected fun seedUnread(key: String, frame: JSONObject) {
         if (key == activeKey) return
         if (frame.has("unread")) setBadge(unread, key, frame.optInt("unread", 0))
         if (frame.has("highlights")) setBadge(highlights, key, frame.optInt("highlights", 0))
     }
 
-    private fun countUnread(key: String, frame: JSONObject, msg: Msg) {
+    protected fun countUnread(key: String, frame: JSONObject, msg: Msg) {
         if (key == activeKey || msg.self || msg.system) return
         if (msg.type !in COUNTABLE) return
         unread[key] = (unread[key] ?: 0) + 1
@@ -1180,7 +1185,7 @@ class LurkerClient {
         }
     }
 
-    private fun setBadge(map: MutableMap<String, Int>, key: String, value: Int) {
+    protected fun setBadge(map: MutableMap<String, Int>, key: String, value: Int) {
         if (value <= 0) map.remove(key) else map[key] = value
     }
 
@@ -1210,7 +1215,7 @@ class LurkerClient {
      * of opening was marked — everything watched afterwards stayed "unread" on
      * the server and every other device.
      */
-    private fun scheduleMarkRead(key: String) {
+    protected fun scheduleMarkRead(key: String) {
         if (key != activeKey || markReadQueued) return
         markReadQueued = true
         main.postDelayed({
@@ -1331,7 +1336,7 @@ class LurkerClient {
         ws?.send(JSONObject().put("type", "remove-alias").put("id", id).toString())
     }
 
-    private fun markRead(buffer: Buffer) {
+    protected fun markRead(buffer: Buffer) {
         val networkId = buffer.networkId ?: return
         val lastId = messagesByBuffer[buffer.key]?.lastOrNull { it.id > 0 }?.id ?: return
         ws?.send(
@@ -1412,7 +1417,7 @@ class LurkerClient {
     }
 
     /** Best-effort one-line rendering of a structural IRC event. */
-    private fun systemLine(type: String, nick: String, text: String, e: JSONObject): String {
+    protected fun systemLine(type: String, nick: String, text: String, e: JSONObject): String {
         val reason = text.takeIf { it.isNotBlank() }
         return when (type) {
             "join" -> "→ $nick joined"
@@ -1436,7 +1441,7 @@ class LurkerClient {
     // ---- Sending ----------------------------------------------------------
 
     /** Hydrate a buffer's history on open (shells arrive empty). */
-    fun open(buffer: Buffer) {
+    open fun open(buffer: Buffer) {
         val networkId = buffer.networkId ?: return
         ws?.send(
             JSONObject()
@@ -1477,21 +1482,21 @@ class LurkerClient {
     /** Execute the parsed composer input against [buffer]. */
     /** Record a user-initiated join so channel-joined can focus the channel we
      *  actually land in (a 470 forward can rename it) and drop the ghost request. */
-    private fun noteJoinRequest(networkId: Int, channel: String) {
+    protected fun noteJoinRequest(networkId: Int, channel: String) {
         pendingJoin[networkId] = channel to System.currentTimeMillis()
     }
 
     /** Join a channel WITHOUT optimistically creating its buffer (per amiantos —
      *  channels are pending until channel-joined). The transient Buffer only
      *  carries the networkId to execute; it's never added to the buffer list. */
-    fun join(networkId: Int, channel: String) {
+    open fun join(networkId: Int, channel: String) {
         execute(
             Buffer(networkId, channel, networks[networkId]?.name ?: ""),
             listOf(WireOp("join", channel = channel)),
         )
     }
 
-    fun execute(buffer: Buffer, ops: List<WireOp>) {
+    open fun execute(buffer: Buffer, ops: List<WireOp>) {
         val networkId = buffer.networkId ?: return
         val socket = ws ?: return
         for (op in ops) {
@@ -1573,7 +1578,7 @@ class LurkerClient {
     val networkConfigs = mutableStateListOf<NetworkConfig>()
     var networksError by mutableStateOf<String?>(null)
 
-    fun loadNetworkConfigs() = io.execute {
+    open fun loadNetworkConfigs() = io.execute {
         try {
             http.newCall(authed("/api/networks").build()).execute().use { res ->
                 if (!res.isSuccessful) {
@@ -1617,7 +1622,7 @@ class LurkerClient {
     }
 
     /** Create (id == null) or update (id != null) a network; refreshes the list. */
-    fun saveNetwork(id: Int?, fields: Map<String, Any?>, onDone: (String?) -> Unit) = io.execute {
+    open fun saveNetwork(id: Int?, fields: Map<String, Any?>, onDone: (String?) -> Unit) = io.execute {
         try {
             val payload = JSONObject()
             for ((k, v) in fields) if (v != null) payload.put(k, v)
@@ -1643,7 +1648,7 @@ class LurkerClient {
         }
     }
 
-    fun deleteNetwork(id: Int, onDone: (String?) -> Unit) = io.execute {
+    open fun deleteNetwork(id: Int, onDone: (String?) -> Unit) = io.execute {
         try {
             http.newCall(authed("/api/networks/$id").delete().build()).execute().use { res ->
                 if (!res.isSuccessful) {
@@ -1659,7 +1664,7 @@ class LurkerClient {
     }
 
     /** connect | disconnect | reconnect. Live state lands via the WS snapshot. */
-    fun networkAction(id: Int, action: String) = io.execute {
+    open fun networkAction(id: Int, action: String) = io.execute {
         try {
             http.newCall(
                 authed("/api/networks/$id/$action").post(ByteArray(0).toRequestBody(null)).build(),

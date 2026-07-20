@@ -33,6 +33,12 @@ class Prefs(context: Context) {
 
     val hasSession: Boolean get() = !token.isNullOrEmpty() && !serverUrl.isNullOrEmpty()
 
+    /** Which backend to run: "lurker" (WebSocket to a Lurker server) or "direct"
+     *  (raw IRC / bouncer via KICL). null = first run → mode picker. */
+    var clientMode: String?
+        get() = sp.getString("clientMode", null)
+        set(value) = sp.edit { putString("clientMode", value) }
+
     /** Selected app theme id ("light" | "dark" | "oled"); null = default. */
     var theme: String?
         get() = sp.getString("theme", null)
