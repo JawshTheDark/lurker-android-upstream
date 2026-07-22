@@ -1,108 +1,111 @@
 # Lurker for Android
 
-A native Android client for [Lurker](https://github.com/amiantos/lurker), an IRC client with a
-server that stays connected for you.
+A native Android client for [Lurker](https://github.com/amiantos/lurker) — Kotlin + Jetpack Compose,
+built to feel like a modern messaging app rather than a terminal. It talks to a Lurker bouncer server
+over its WebSocket + REST contract, and it also ships a **standalone direct-IRC mode** so it works
+even without a Lurker server at all.
 
-> **Status: early client.** Born as a spike to prove Lurker's WebSocket + REST contract can be driven
-> from a native client — that part is done — and since grown into something usable day to day: it
-> stays signed in, survives network drops, renders formatted chat, and handles slash-commands,
-> settings, and DCC transfers. It is still built around a single source of truth rather than the
-> layered architecture the real app ([lurker#492](https://github.com/amiantos/lurker/issues/492))
-> calls for. See [Scope](#what-this-does-and-doesnt-do).
+> **Status: release-candidate.** What began as a spike to prove Lurker's bearer-token contract could
+> drive a native client has grown into a daily driver: signed-in persistence, resilient reconnect,
+> formatted chat, member lists, uploads, search, DCC, notifications, and a full second backend that
+> speaks raw IRC and bouncers. Actively used against production servers and the hosted app.
 
-## What it proves
+## Two ways to run it
 
-Lurker is a true bouncer: the client never touches IRC. The server does all the IRC work — parsing,
-TLS, SASL, reconnect, history, highlight matching, ignore filtering — and speaks to clients in
-high-level concepts (networks, buffers, messages, members) over one WebSocket plus a small REST
-surface.
+**Lurker mode** — connect to a Lurker server, which stays connected to IRC for you (a true bouncer:
+the client never touches IRC; the server does parsing, TLS, SASL, reconnect, history, highlight
+matching, and ignore filtering). Works with:
 
-Until recently, though, the WebSocket authenticated by **cookie only**, so a native client couldn't
-open one at all. [lurker#489](https://github.com/amiantos/lurker/issues/489) added bearer-token auth
-to the upgrade, and this app is the end-to-end proof that it works:
+- **Hosted [lurker.chat](https://lurker.chat)** — sign in with your email; the token is minted at the
+  control plane and all traffic is proxied to your cell transparently.
+- **Self-hosted Lurker** — sign in with your username and password against your own server.
 
-1. `POST /api/auth/login/token` — password in, session token out, no browser in the loop.
-2. `GET /api/networks` with `Authorization: Bearer <token>` — the same token authenticates REST.
-3. `GET /ws` with the same bearer header on the **upgrade** — the thing browsers cannot do, and
-   precisely why the web client is cookie-bound and native clients don't have to be.
+**Direct mode** — a standalone IRC client with no Lurker server required. Powered by
+[KICL](https://github.com/KittehOrg/KittehIRCClientLib) (Netty, IRCv3), it connects **straight to IRC
+networks** or to a **bouncer** (soju / ZNC). SASL, multi-network, cap negotiation, and auto-reconnect
+are all handled on-device; secrets are encrypted at rest. Connecting to a bouncer gets much of the
+always-on benefit back, since the bouncer stays connected upstream. First-class support for soju's
+`bouncer-networks` means one login can surface all your upstream networks as separate entries.
 
-A native session is an ordinary session: the bearer *is* the session token the web client's cookie
-already carries, just handed to the app in a response body instead of a `Set-Cookie`.
+Pick the mode on first launch; it can be switched later from Settings.
 
-## What this does (and doesn't) do
+## Features
 
-**Does:**
-
-- **Stays signed in.** The bearer session is saved to app-private storage, so the app reconnects
-  silently on launch. Sign out clears it (and best-effort revokes it server-side).
-- **Survives drops.** The socket auto-reconnects with exponential backoff, and on return from the
-  background it resumes with `?since=<lastId>` so you don't miss messages. A dead token (401) bounces
-  you to the sign-in screen instead of spinning.
-- **Reads naturally.** Renders mIRC colors and text formatting (bold/italic/underline/mono), makes
-  URLs tappable, and shows joins / parts / quits / nick changes / kicks / modes / topics as inline
-  system lines.
-- **Buffer list that scales.** Grouped by network, DMs after channels, buffers with activity floated
-  to the top, with unread and highlight badges. Opening a buffer clears its badge and marks it read.
+- **Stays signed in.** The session is saved to app-private storage and reconnects silently on launch.
+  Optional biometric / device-credential lock on open.
+- **Resilient.** Auto-reconnect with backoff; on return from background it resumes with `?since=` so
+  nothing is missed. An optional foreground service holds the connection open for reliable
+  notifications.
+- **Reads like a chat app.** iMessage-style bubbles with sender grouping, mIRC color + formatting
+  (bold / italic / underline / mono), tappable links, and inline system lines for joins, parts,
+  quits, nick changes, kicks, modes, and topics. Light / Dark / OLED themes and a 24-hour clock
+  option; font size scales cleanly.
+- **Inline media.** Images, GIFs, and video embed in the timeline with a built-in viewer.
+- **Buffer list that scales.** Grouped by network, DMs after channels, active buffers floated up,
+  unread + highlight badges, pins, and mark-all-read. Secure (E2E) buffers show a lock.
+- **Mentions.** Highlighted messages get a gold bubble (colour configurable), and tapping a
+  notification opens the channel and jumps to the exact message.
+- **Members.** Full member list with op/voice prefixes and per-nick actions (query, whois, op, kick,
+  ban, notes…).
+- **Composer.** Formatting toolbar + colour picker, tab-completion for nicks and commands, typing
+  indicators, swipe-to-reply, and image/file uploads (plus Android share-sheet targets).
 - **Slash-commands.** `/me`, `/msg`, `/query`, `/join`, `/part`, `/nick`, `/topic`, `/kick`, `/mode`,
-  `/op`, `/ban`, `/whois`, `/away`, `/ctcp`, `/slap`, `/cycle`, `/raw`, … (`/help` lists them). The
-  handful with special wire semantics map to structured socket messages; the rest lower to a `raw`
-  IRC line. `//` sends a literal leading slash.
-- **Settings.** A registry-driven editor over `/api/settings` — every server-advertised setting is
-  editable by type (toggle, number, choice, text) with no per-key hard-coding.
-- **DCC receive.** Lists transfers, accept / reject / cancel, with live progress from `dcc-transfer`
-  frames.
+  `/op`, `/ban`, `/whois`, `/away`, `/ctcp`, `/list`, `/raw`, … (`/help` lists them). `//` sends a
+  literal leading slash.
+- **Channel browser.** `/list` opens a searchable, sortable channel directory that streams results
+  live as the server's `LIST` completes.
+- **Search & contacts.** Server-side message search with highlights; friends / notes / ignores.
+- **DCC.** Receive **and** send file transfers, plus DCC chat, with live progress.
+- **Settings.** A registry-driven editor over the server's settings surface — every advertised
+  setting is editable by type — alongside device-local app preferences.
 
-**Doesn't (yet):** member lists · uploads · message search · highlight-rule editing · push
-notifications · passkey sign-in (the token mint is password-only) · **DCC send & chat** — the server
-engine for those lives on a branch that isn't wired or deployed, so that surface is scaffolded and
-disabled until the API ships.
+## Flavors
 
-The code is still one source of truth, not a layered architecture. Transport and observable state
-live in [`LurkerClient.kt`](app/src/main/java/net/amiantos/lurker/LurkerClient.kt); the pure,
-unit-tested logic is split out into [`Mirc.kt`](app/src/main/java/net/amiantos/lurker/Mirc.kt) and
-[`Commands.kt`](app/src/main/java/net/amiantos/lurker/Commands.kt); the screens are in
-[`MainActivity.kt`](app/src/main/java/net/amiantos/lurker/MainActivity.kt). The real app
-([lurker#492](https://github.com/amiantos/lurker/issues/492)) is still meant to be rebuilt around one
-internal model with a transport-adapter seam; this is the well-worn stepping stone, not that.
+One codebase, two identities (Gradle product flavors):
 
-## A note on token storage
+- **`full`** — `net.amiantos.lurker`, "Lurker" — the private daily-driver / sideload build.
+- **`spooky`** — `chat.irc.lurker`, "Spooky for Lurker" — the public Play Store build.
 
-The saved bearer *is* your session — treat it like a password. It lives in app-private
-SharedPreferences, unreadable by other apps on a non-rooted device, but it is **not** encrypted at
-rest. Moving it into `EncryptedSharedPreferences` / the Android Keystore is the obvious next
-hardening step and is the reason cleartext HTTP (below) must not survive into a shipping build.
+Fork-only surfaces (custom aliases, DCC send/chat, fserve) are gated at **runtime** on the connected
+server's capabilities, so both flavors carry all the code and simply light those up on a capable
+server — there's no stripped branch to maintain.
 
-## Running it
-
-Requires a Lurker server you can reach, with a **password** set on your account — the token mint
-endpoint is password-only, so a passkey-only account can't sign in yet.
+## Building
 
 ```bash
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+# Debug (full flavor)
+./gradlew assembleFullDebug
+adb install -r app/build/outputs/apk/full/debug/app-full-debug.apk
+
+# Release APK (sideload) / Play bundle
+./gradlew assembleFullRelease
+./gradlew bundleSpookyRelease
 ```
 
-Point it at your server on the sign-in screen. Two things catch people out:
+Release signing for the Play build reads a gitignored `keystore.properties`; absent it (fresh clone),
+release falls back to debug signing so the build still succeeds.
 
-- **Use the API server's port** (`8010` by default), not the Vite client dev port — that one only
-  serves the web SPA and has no `/api` or `/ws`.
-- **From the emulator, the host machine is `10.0.2.2`**, not `localhost` (which is the emulator
-  itself). So a local dev server is `http://10.0.2.2:8010`. From a physical device on the same
-  network, use the machine's LAN address instead.
+To sign in, point it at your server: the hosted app is `lurker.chat` (email login), a self-hosted
+server is its address (username login — use the **API** port, `8010` by default, not the web dev
+port). From the emulator the host machine is `10.0.2.2`, not `localhost`. Cleartext HTTP is permitted
+for local dev servers.
 
-Cleartext HTTP is enabled in the manifest so a plain-HTTP dev server works. That is a prototype
-convenience and should not survive into a shipping build.
+## Security notes
 
-## A note on the buffer list
+- **Sessions** live in app-private storage, unreadable by other apps on a non-rooted device.
+- **Direct-mode IRC/SASL secrets** are encrypted at rest via `EncryptedSharedPreferences` — direct
+  mode stores real IRC account passwords, so these are kept out of cleartext.
 
-On connect, the server ships one `backlog` frame per buffer — but for channels and DMs those frames
-are **shells** with no messages in them. Lurker auto-focuses nothing on load, so it doesn't read a
-buffer's history until the client actually opens it. The client sends `open-buffer` and the server
-replies with a real backlog frame.
+## Architecture
 
-Get this wrong and you build a correct-looking buffer list where every channel is empty, which reads
-as a bug but is the lazy-hydration design working as intended. It's the one piece of the contract
-that isn't obvious from the frame names.
+The UI talks to one observable backend. The base
+[`LurkerClient`](app/src/main/java/net/amiantos/lurker/LurkerClient.kt) drives the WebSocket + REST
+transport to a Lurker server; `DirectIrcBackend` subclasses it and overrides the transport with a
+KICL-backed raw-IRC / bouncer engine, reusing the same Compose state and rendering. Pure,
+unit-tested logic — mIRC parsing, command parsing, completion — is split into
+[`Mirc.kt`](app/src/main/java/net/amiantos/lurker/Mirc.kt),
+[`Commands.kt`](app/src/main/java/net/amiantos/lurker/Commands.kt), and friends; the screens live in
+[`MainActivity.kt`](app/src/main/java/net/amiantos/lurker/MainActivity.kt).
 
 ## License
 
