@@ -792,7 +792,9 @@ open class LurkerClient {
                 if (!mergeInto(buffer.key, listOf(msg), replace = false)) return
                 countUnread(buffer.key, frame, msg)
                 if (msg.id > 0) scheduleMarkRead(buffer.key)
-                if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground)) {
+                if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground) &&
+                    !isMutedForNotify(buffer.networkId, buffer.target, frame.optString("userhost"), msg.nick)
+                ) {
                     notificationSink?.invoke(
                         NotifiableEvent(buffer.networkId, buffer.target, msg.nick, msg.text, frame.optBoolean("dm"), msg.id),
                     )
@@ -2049,6 +2051,71 @@ open class LurkerClient {
         val networkId = buffer.networkId ?: return
         if (on) notifyAlways["$networkId::${buffer.target}"] = true else notifyAlways.remove("$networkId::${buffer.target}")
         ws?.send(JSONObject().put("type", "set-channel-notify-always").put("networkId", networkId).put("target", buffer.target).put("notifyAlways", on).toString())
+    }
+
+    // ---- Per-channel notification mute ------------------------------------
+    // A channel mute is a NONOTIFY ignore rule scoped to the channel (issue #359
+    // folded the old `muted` flag into the ignore engine). The server bakes mutes
+    // into web-push, but the `notify` flag it sends live clients does NOT encode
+    // them — so a native client that trusts `notify` (see shouldNotify) would
+    // still buzz on a muted channel (freakyy85's relayed-channel report). We
+    // apply the mute locally: honor it in the notify path AND expose a toggle.
+
+    /** The channel-scope NONOTIFY/ALL mute rule for [buffer], if one exists. */
+    private fun channelMuteRule(buffer: Buffer): IgnoreRule? {
+        val nid = buffer.networkId ?: return null
+        return ignores.firstOrNull { r ->
+            !r.isExcept &&
+                r.mask == null &&
+                (r.levels.contains("NONOTIFY") || r.levels.contains("ALL")) &&
+                (r.networkId == null || r.networkId == nid) &&
+                r.channels?.any { it.equals(buffer.target, true) } == true
+        }
+    }
+
+    fun isNotifyMuted(buffer: Buffer): Boolean = channelMuteRule(buffer) != null
+
+    /** Toggle "mute notifications" for a channel. On = add a channel-scoped
+     *  NONOTIFY rule (keeps messages visible, just silences pings); off = remove it. */
+    fun setNotifyMuted(buffer: Buffer, on: Boolean) {
+        val networkId = buffer.networkId ?: return
+        if (on) {
+            if (channelMuteRule(buffer) == null) {
+                addIgnore(networkId, mask = null, levels = listOf("NONOTIFY"), channels = listOf(buffer.target))
+            }
+        } else {
+            channelMuteRule(buffer)?.let { removeIgnore(it.networkId, it.id) }
+        }
+    }
+
+    /** True when a synced ignore rule silences NOTIFICATIONS for this event — a
+     *  channel-scope mute (mask null) or a sender-specific NONOTIFY/ALL rule. The
+     *  local notifier must apply this itself; the server only honors it in push. */
+    private fun isMutedForNotify(networkId: Int?, target: String, userhost: String?, nick: String?): Boolean {
+        if (ignores.isEmpty()) return false
+        return ignores.any { r ->
+            if (r.isExcept) return@any false
+            if (!(r.levels.contains("NONOTIFY") || r.levels.contains("ALL"))) return@any false
+            if (r.networkId != null && r.networkId != networkId) return@any false
+            if (r.channels != null && r.channels.none { it.equals(target, true) }) return@any false
+            // Null mask = whole-scope mute (channel/network); else match the sender.
+            r.mask == null || ircMaskMatches(r.mask, userhost, nick)
+        }
+    }
+
+    /** IRC glob match (`*` any run, `?` one char, case-insensitive). A bare-nick
+     *  mask (no ! or @) matches the nick; a full mask matches nick!user@host. */
+    private fun ircMaskMatches(mask: String, userhost: String?, nick: String?): Boolean {
+        val rx = runCatching {
+            Regex(
+                "(?i)" + mask.map {
+                    when (it) { '*' -> ".*"; '?' -> "."; else -> Regex.escape(it.toString()) }
+                }.joinToString(""),
+            )
+        }.getOrNull() ?: return false
+        val bareNick = !mask.contains('!') && !mask.contains('@')
+        val subject = if (bareNick) (nick ?: userhost) else (userhost ?: nick)
+        return subject != null && rx.matches(subject)
     }
 
     fun isBookmarked(id: Long): Boolean = id in bookmarkIds

@@ -1032,6 +1032,7 @@ private fun BufferListBody(
                                 hasDraft = !client.drafts[buffer.key].isNullOrBlank(),
                                 pinned = client.isPinned(buffer),
                                 notifyAll = client.isNotifyAlways(buffer),
+                                muted = client.isNotifyMuted(buffer),
                                 showNetwork = section.network == "★ Pinned" || isFriendRow,
                                 // Green lock, matching the chat header. Prefer loaded
                                 // history (self-correcting if E2E is turned off); fall
@@ -1048,6 +1049,9 @@ private fun BufferListBody(
                                 },
                                 onToggleNotify = if (buffer.isChannel) {
                                     { client.setNotifyAlways(buffer, !client.isNotifyAlways(buffer)) }
+                                } else null,
+                                onToggleMute = if (buffer.isChannel) {
+                                    { client.setNotifyMuted(buffer, !client.isNotifyMuted(buffer)) }
                                 } else null,
                                 onClick = { onOpen(buffer) },
                                 onClose = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
@@ -1140,17 +1144,19 @@ private fun BufferRow(
     hasDraft: Boolean = false,
     pinned: Boolean = false,
     notifyAll: Boolean = false,
+    muted: Boolean = false,
     showNetwork: Boolean = false,
     e2e: Boolean = false,
     online: Boolean? = null,
     label: String? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
+    onToggleMute: (() -> Unit)? = null,
     onClick: () -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
     var menu by remember { mutableStateOf(false) }
-    if (onClose != null || onTogglePin != null) {
+    if (onClose != null || onTogglePin != null || onToggleMute != null) {
         AppDropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             if (onTogglePin != null) {
                 DropdownMenuItem(
@@ -1162,6 +1168,12 @@ private fun BufferRow(
                 DropdownMenuItem(
                     text = { Text(if (notifyAll) "Notify: highlights only" else "Notify on every message") },
                     onClick = { menu = false; onToggleNotify() },
+                )
+            }
+            if (onToggleMute != null) {
+                DropdownMenuItem(
+                    text = { Text(if (muted) "Unmute notifications" else "Mute notifications") },
+                    onClick = { menu = false; onToggleMute() },
                 )
             }
             if (onClose != null) {
