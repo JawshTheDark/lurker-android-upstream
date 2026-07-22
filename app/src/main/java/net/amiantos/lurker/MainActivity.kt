@@ -71,7 +71,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import android.Manifest
+import android.app.Activity
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.view.WindowManager
 import android.os.Build
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -97,6 +100,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -1072,6 +1076,14 @@ private fun BufferListBody(
         }
 }
 
+/** Unwrap a Compose context to its host Activity (for window-level flags like
+ *  FLAG_SECURE). Compose hands you a ContextWrapper, not the Activity directly. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 private data class BufferSection(val network: String, val buffers: List<Buffer>)
 
 /**
@@ -1114,17 +1126,29 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
 
     // Pinned + friend-primary buffers live only in their own sections — drop them
     // from the network group so they don't show twice (matches the web client).
+    // Group by stable network id, NOT the buffer's stored networkName. That name
+    // is captured when the buffer is first created; if the network's name isn't
+    // known yet it falls back ("network"/"system"), and since the field never
+    // updates, one network's rows scatter across mismatched sections (the "two
+    // Server rows / funky sections" bug). Grouping by id keeps a network's rows
+    // together and resolves the header label live, so a late name-fetch fixes it.
     val byNetwork = client.buffers
         .filterNot { client.isPinned(it) }
         .filterNot { it.key in friendKeys }
-        .groupBy { it.networkName }
-    byNetwork.keys
-        .sortedWith(compareBy({ client.networkOrder(it) }, { it.lowercase() }))
-        .forEach { network ->
+        .groupBy { it.networkId }
+    byNetwork.entries
+        .sortedWith(
+            compareBy(
+                { it.key == null }, // the app-scoped :system: buffer sorts last
+                { it.key?.let { id -> client.networkOrder(client.networkName(id)) } ?: Int.MAX_VALUE },
+                { it.key?.let { id -> client.networkName(id).lowercase() } ?: "system" },
+            ),
+        )
+        .forEach { (networkId, bufs) ->
             out.add(
                 BufferSection(
-                    network = network,
-                    buffers = byNetwork.getValue(network).sortedWith(
+                    network = networkId?.let { client.networkName(it) } ?: "System",
+                    buffers = bufs.sortedWith(
                         compareByDescending<Buffer> { it.isServerBuffer } // Server row leads
                             .thenByDescending { (client.unread[it.key] ?: 0) > 0 }
                             .thenByDescending { it.isChannel }
@@ -1382,6 +1406,7 @@ private fun ChatScreen(
     }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
+    var showTopic by remember { mutableStateOf(false) }
     // Message whose long-press action sheet is open, if any.
     var actionMsg by remember(buffer.key) { mutableStateOf<Msg?>(null) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
@@ -1399,6 +1424,20 @@ private fun ChatScreen(
 
     // Upload → provider URL → splice into the draft (attach button + share sheet).
     val context = LocalContext.current
+    // Encrypted (E2E) channels: block screenshots, screen-recording, and the
+    // recents-preview thumbnail while one is on screen (FLAG_SECURE). Uses the
+    // persisted known-E2E set too, so protection is on before history loads.
+    // Cleared on leave so normal buffers stay screenshot-able.
+    val secureBuffer = e2eActive || buffer.key in client.e2eSeen
+    DisposableEffect(secureBuffer) {
+        val window = context.findActivity()?.window
+        if (secureBuffer) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose { context.findActivity()?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
     fun uploadIntoDraft(uri: Uri) {
         val upload = readUpload(context, uri)
         if (upload == null) {
@@ -1480,6 +1519,30 @@ private fun ChatScreen(
         if (typers.isNotEmpty() && rows.isNotEmpty() && !listState.canScrollForward) {
             listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
+    }
+
+    if (showTopic) {
+        val topic = client.topics[buffer.key].orEmpty()
+        AlertDialog(
+            onDismissRequest = { showTopic = false },
+            containerColor = SurfaceRaised,
+            title = { Text("Topic — ${buffer.displayName}", color = TextPrimary, fontSize = 16.sp) },
+            text = {
+                if (topic.isBlank()) {
+                    Text("No topic set.", color = TextSecondary)
+                } else {
+                    Text(
+                        mircAnnotated(topic, AccentBlue, openLink),
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTopic = false }) { Text("Close", color = AccentBlue) }
+            },
+        )
     }
 
     joinPrompt?.let { chan ->
@@ -1677,8 +1740,9 @@ private fun ChatScreen(
             }
         }
 
-        // Frosted top bar.
-        Box(
+        // Frosted top bar (app bar + optional topic bar stacked; the column's
+        // measured height feeds the list's top content padding).
+        Column(
             Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
@@ -1758,6 +1822,27 @@ private fun ChatScreen(
                     }
                 },
             )
+            // Channel topic bar — one tappable line under the app bar; tap to
+            // read the full topic (works on phone, not just the tablet layout).
+            val topic = client.topics[buffer.key]
+            if (buffer.isChannel && !topic.isNullOrBlank()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { showTopic = true }
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        mircAnnotated(topic, AccentBlue),
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
         }
 
         // Frosted composer, hugging the keyboard.

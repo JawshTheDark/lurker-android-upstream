@@ -110,6 +110,10 @@ open class LurkerClient {
     /** "networkId::#target" -> notify-always flag. */
     val notifyAlways = mutableStateMapOf<String, Boolean>()
 
+    /** "networkId::#target" -> current channel topic. Fed by `channel-topic`
+     *  (RPL_TOPIC sync on join) and live `topic` changes; drives the topic bar. */
+    val topics = mutableStateMapOf<String, String>()
+
     /** Message ids the user has bookmarked (saved). Synced from the server. */
     val bookmarkIds = mutableStateSetOf<Long>()
 
@@ -384,6 +388,7 @@ open class LurkerClient {
             pins.clear()
             nickNotes.clear()
             notifyAlways.clear()
+            topics.clear()
             chanlistRows.clear()
             searchResults.clear()
             highlightItems.clear()
@@ -730,6 +735,24 @@ open class LurkerClient {
                 }
                 val target = frame.optString("target")
                 if (target.isEmpty()) return
+                // Current-topic sync (RPL_TOPIC on join). Ephemeral, no chat row —
+                // just update the topic bar. Live TOPIC *changes* arrive as a
+                // "topic" system line (handled below) and also refresh the bar.
+                if (frame.optString("type") == "channel-topic") {
+                    if (networkId != null) {
+                        val key = "$networkId::$target"
+                        val t = frame.optString("topic")
+                        if (t.isEmpty()) topics.remove(key) else topics[key] = t
+                    }
+                    return
+                }
+                if (frame.optString("type") == "topic" && networkId != null) {
+                    // A live change: keep the topic bar current (still falls through
+                    // to render the "X set the topic" system line below).
+                    val key = "$networkId::$target"
+                    val t = frame.optString("text").ifEmpty { frame.optString("reason") }
+                    if (t.isEmpty()) topics.remove(key) else topics[key] = t
+                }
                 // Typing is ephemeral and must not create buffers — handle it
                 // before ensureBuffer and bail.
                 if (frame.optString("type") == "typing") {
@@ -1761,6 +1784,10 @@ open class LurkerClient {
                     return@execute
                 }
                 loadNetworkConfigs()
+                // Also refresh the id→name map + live network states so a freshly
+                // added network is labelled correctly straight away (otherwise its
+                // buffers fall back to "network"/"system" and scatter, #buffers-funky).
+                fetchNetworkNames()
                 post { onDone(null) }
             }
         } catch (e: Exception) {
@@ -1776,6 +1803,10 @@ open class LurkerClient {
                     return@execute
                 }
                 loadNetworkConfigs()
+                // Also refresh the id→name map + live network states so a freshly
+                // added network is labelled correctly straight away (otherwise its
+                // buffers fall back to "network"/"system" and scatter, #buffers-funky).
+                fetchNetworkNames()
                 post { onDone(null) }
             }
         } catch (e: Exception) {
