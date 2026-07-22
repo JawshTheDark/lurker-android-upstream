@@ -192,6 +192,13 @@ open class LurkerClient {
     private var highlightsNextBefore: Long? = null
     var highlightsHasMore by mutableStateOf(false)
 
+    // Bookmarks — saved messages, fetched from GET /api/bookmarks (same row shape
+    // as highlights, so they reuse SearchResult + ResultRow).
+    val bookmarkItems = mutableStateListOf<SearchResult>()
+    var bookmarksLoading by mutableStateOf(false)
+    private var bookmarksNextBefore: Long? = null
+    var bookmarksHasMore by mutableStateOf(false)
+
     // Settings (registry-driven; empty if the server predates the endpoint).
     val settingsRegistry = mutableStateListOf<SettingOption>()
     val settingsValues = mutableStateMapOf<String, Any?>()
@@ -380,6 +387,9 @@ open class LurkerClient {
             chanlistRows.clear()
             searchResults.clear()
             highlightItems.clear()
+            bookmarkItems.clear()
+            bookmarksNextBefore = null
+            bookmarksHasMore = false
             settingsRegistry.clear()
             settingsValues.clear()
             settingsLoaded = false
@@ -897,7 +907,14 @@ open class LurkerClient {
             }
             "bookmark-updated" -> {
                 val id = frame.optLong("messageId")
-                if (frame.optBoolean("saved")) bookmarkIds.add(id) else bookmarkIds.remove(id)
+                if (frame.optBoolean("saved")) {
+                    bookmarkIds.add(id)
+                } else {
+                    bookmarkIds.remove(id)
+                    // Keep the open bookmarks list in sync when one is removed
+                    // (from here or another device) — no full reload needed.
+                    bookmarkItems.removeAll { it.id == id }
+                }
             }
 
             "contacts-snapshot" -> {
@@ -1961,6 +1978,40 @@ open class LurkerClient {
                 }
             } catch (_: Exception) {
                 post { highlightsLoading = false }
+            }
+        }
+    }
+
+    /** GET /api/bookmarks — paginated saved messages (REST), newest first. */
+    fun loadBookmarks(fresh: Boolean) {
+        if (bookmarksLoading) return
+        if (fresh) { bookmarkItems.clear(); bookmarksNextBefore = null }
+        val before = bookmarksNextBefore
+        post { bookmarksLoading = true }
+        io.execute {
+            try {
+                val path = "/api/bookmarks?limit=50" + (before?.let { "&before=$it" } ?: "")
+                http.newCall(authed(path).build()).execute().use { res ->
+                    if (!res.isSuccessful) {
+                        post { bookmarksLoading = false }
+                        return@execute
+                    }
+                    val obj = JSONObject(res.body?.string().orEmpty())
+                    val arr = obj.optJSONArray("items")
+                    val next = if (obj.isNull("nextBefore")) null else obj.optLong("nextBefore")
+                    val rows = ArrayList<SearchResult>()
+                    if (arr != null) for (i in 0 until arr.length()) {
+                        parseResultRow(arr.optJSONObject(i) ?: continue)?.let(rows::add)
+                    }
+                    post {
+                        bookmarkItems.addAll(rows)
+                        bookmarksNextBefore = next
+                        bookmarksHasMore = next != null
+                        bookmarksLoading = false
+                    }
+                }
+            } catch (_: Exception) {
+                post { bookmarksLoading = false }
             }
         }
     }

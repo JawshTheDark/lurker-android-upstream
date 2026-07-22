@@ -4212,7 +4212,7 @@ private fun SearchScreen(
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    var tab by remember { mutableStateOf(0) } // 0 = search, 1 = highlights
+    var tab by remember { mutableStateOf(0) } // 0 = search, 1 = highlights, 2 = bookmarks
     var query by remember { mutableStateOf("") }
 
     // Debounced search: re-run 300ms after typing stops.
@@ -4223,6 +4223,7 @@ private fun SearchScreen(
     }
     LaunchedEffect(tab) {
         if (tab == 1 && client.highlightItems.isEmpty()) client.loadHighlights(fresh = true)
+        if (tab == 2) client.loadBookmarks(fresh = true)
     }
 
     Scaffold(
@@ -4242,6 +4243,7 @@ private fun SearchScreen(
             Row(Modifier.fillMaxWidth().padding(16.dp, 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SearchTab("Messages", tab == 0) { tab = 0 }
                 SearchTab("Highlights", tab == 1) { tab = 1 }
+                SearchTab("Bookmarks", tab == 2) { tab = 2 }
             }
             if (tab == 0) {
                 TextField(
@@ -4275,7 +4277,7 @@ private fun SearchScreen(
                         }
                     }
                 }
-            } else {
+            } else if (tab == 1) {
                 val items = client.highlightItems
                 if (client.highlightsLoading && items.isEmpty()) {
                     Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
@@ -4288,6 +4290,25 @@ private fun SearchScreen(
                         ResultRow(client, items[i], onOpenResult)
                         if (i == items.size - 1 && client.highlightsHasMore) {
                             LaunchedEffect(items.size) { client.loadHighlights(fresh = false) }
+                        }
+                    }
+                }
+            } else {
+                val items = client.bookmarkItems
+                if (client.bookmarksLoading && items.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+                }
+                if (!client.bookmarksLoading && items.isEmpty()) {
+                    Text(
+                        "No bookmarks yet. Long-press a message and tap Bookmark to save it here.",
+                        color = TextSecondary, modifier = Modifier.padding(16.dp),
+                    )
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(items.size) { i ->
+                        ResultRow(client, items[i], onOpenResult)
+                        if (i == items.size - 1 && client.bookmarksHasMore) {
+                            LaunchedEffect(items.size) { client.loadBookmarks(fresh = false) }
                         }
                     }
                 }
