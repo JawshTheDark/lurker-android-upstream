@@ -32,11 +32,17 @@ fun nickColor(nick: String): Color {
     return NICK_COLORS[h % NICK_COLORS.size]
 }
 
-private val TIME_FORMAT = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
+private val TIME_FORMAT_12 = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
+private val TIME_FORMAT_24 = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
 
-/** ISO timestamp -> "12:45 PM" in the device zone; null if unparseable. */
+/** ISO timestamp -> "12:45 PM" (or "12:45" when [Ui.clock24h]) in the device
+ *  zone; null if unparseable. Reads Ui.clock24h so timestamps recompose live
+ *  when the toggle flips. */
 fun formatTime(iso: String?): String? = try {
-    iso?.let { TIME_FORMAT.format(Instant.parse(it).atZone(ZoneId.systemDefault())) }
+    iso?.let {
+        val fmt = if (Ui.clock24h) TIME_FORMAT_24 else TIME_FORMAT_12
+        fmt.format(Instant.parse(it).atZone(ZoneId.systemDefault()))
+    }
 } catch (_: Exception) {
     null
 }

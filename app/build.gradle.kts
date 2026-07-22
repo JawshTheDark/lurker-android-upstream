@@ -26,8 +26,8 @@ android {
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
         minSdk = 31
         targetSdk = 36
-        versionCode = 52
-        versionName = "0.9.32"
+        versionCode = 60
+        versionName = "0.9.40"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -108,6 +108,9 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    // LifecycleResumeEffect — re-pin the chat list to the tail on app resume
+    // (version aligned with the Compose BOM's transitive lifecycle).
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation(libs.okhttp)
     implementation(libs.haze)
     implementation(libs.haze.materials)

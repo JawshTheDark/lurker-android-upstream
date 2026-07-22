@@ -69,6 +69,6 @@ object Completion {
         "topic", "kick", "invite", "mode", "op", "deop", "voice", "devoice",
         "halfop", "dehalfop", "ban", "unban", "whois", "whowas", "raw", "quote",
         "ns", "cs", "ms", "away", "back", "ctcp", "ping", "slap", "quit", "cycle",
-        "hop", "e2e", "help",
+        "hop", "e2e", "list", "channels", "help",
     )
 }

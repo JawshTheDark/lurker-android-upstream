@@ -32,6 +32,8 @@ sealed interface ParsedInput {
     data class Ops(val ops: List<WireOp>, val openTarget: String? = null) : ParsedInput
     /** A locally-rendered line (help text, or a usage error). */
     data class Local(val message: String, val isError: Boolean) : ParsedInput
+    /** Open the channel browser (/list), optionally seeded with a filter [query]. */
+    data class Browse(val query: String?) : ParsedInput
 }
 
 object Commands {
@@ -125,6 +127,8 @@ object Commands {
                 // joined) or channel-joined focuses the channel we actually land in.
                 else ParsedInput.Ops(listOf(WireOp("join", channel = chan)))
             }
+
+            "list", "channels" -> ParsedInput.Browse(rest.ifBlank { null })
 
             "part", "leave" -> {
                 val parts = if (rest.isEmpty()) emptyList() else rest.split(Regex("\\s+"), limit = 2)
@@ -260,7 +264,7 @@ object Commands {
     private val HELP = buildString {
         appendLine("Commands:")
         appendLine("/me, /msg, /query, /notice, /join, /part, /close, /clear")
-        appendLine("/nick, /topic, /kick, /invite, /mode, /whois")
+        appendLine("/list [filter], /nick, /topic, /kick, /invite, /mode, /whois")
         appendLine("/op, /deop, /voice, /devoice, /ban, /unban")
         appendLine("/away, /back, /ctcp, /ping, /slap, /cycle, /quit")
         appendLine("/ns, /cs, /ms, /raw <line>")

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Camera-capture temp files for the composer "Take photo" action live in
+     cache/camera; FileProvider hands the camera app a grant to write there. -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

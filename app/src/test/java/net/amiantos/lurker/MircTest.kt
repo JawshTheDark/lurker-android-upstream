@@ -99,4 +99,32 @@ class MircTest {
     fun wholeMessageBgNullWithoutCodes() {
         assertEquals(null, Mirc.wholeMessageBg("just plain text"))
     }
+
+    @Test
+    fun openTogglesActiveAfterBareOpener() {
+        // Cursor right after a bare bold opener → bold is open, and stays open as you type.
+        assertEquals(setOf(Fmt.BOLD), Fmt.openTogglesAt("\u0002", 1))
+        assertEquals(setOf(Fmt.BOLD), Fmt.openTogglesAt("\u0002typing", 4))
+    }
+
+    @Test
+    fun openTogglesSecondTogglesOff() {
+        assertEquals(emptySet<String>(), Fmt.openTogglesAt("\u0002off\u0002", 5))
+    }
+
+    @Test
+    fun openTogglesResetClearsEverything() {
+        assertEquals(emptySet<String>(), Fmt.openTogglesAt("\u0002\u001Dboth\u000F", 7))
+    }
+
+    @Test
+    fun openTogglesMultipleAtOnce() {
+        assertEquals(setOf(Fmt.BOLD, Fmt.ITALIC), Fmt.openTogglesAt("\u0002\u001Dx", 3))
+    }
+
+    @Test
+    fun openTogglesOnlyCountsBeforeCursor() {
+        // Bold opener sits AFTER the cursor → not active there yet.
+        assertEquals(emptySet<String>(), Fmt.openTogglesAt("ab\u0002c", 2))
+    }
 }

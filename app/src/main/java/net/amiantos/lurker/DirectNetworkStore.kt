@@ -35,7 +35,7 @@ data class StoredNet(
         username = username, realname = realname, autoconnect = autoconnect,
         hasPassword = !serverPassword.isNullOrEmpty(),
         hasSaslPassword = !saslPassword.isNullOrEmpty(),
-        saslAccount = saslAccount, blocked = false,
+        saslAccount = saslAccount, blocked = false, type = type,
     )
 }
 

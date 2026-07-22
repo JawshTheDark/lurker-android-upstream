@@ -16,13 +16,19 @@ import org.kitteh.irc.client.library.event.channel.ChannelUsersUpdatedEvent
 import org.kitteh.irc.client.library.event.capabilities.CapabilitiesSupportedListEvent
 import org.kitteh.irc.client.library.event.client.ClientNegotiationCompleteEvent
 import org.kitteh.irc.client.library.event.client.ClientReceiveCommandEvent
+import org.kitteh.irc.client.library.event.client.ClientReceiveNumericEvent
 import org.kitteh.irc.client.library.event.connection.ClientConnectionClosedEvent
+import org.kitteh.irc.client.library.event.connection.ClientConnectionFailedEvent
 import org.kitteh.irc.client.library.event.user.PrivateMessageEvent
 import org.kitteh.irc.client.library.event.user.PrivateNoticeEvent
 import org.kitteh.irc.client.library.event.user.UserNickChangeEvent
 import org.kitteh.irc.client.library.event.user.UserQuitEvent
 import org.kitteh.irc.client.library.feature.auth.SaslPlain
 import java.util.concurrent.atomic.AtomicLong
+
+/** Registration/auth-rejection numerics worth surfacing: bad password/token
+ *  (464), banned (465/466), and SASL failures (904/905/906). */
+private val AUTH_ERROR_NUMERICS = setOf(464, 465, 466, 904, 905, 906)
 
 /**
  * Direct-IRC / bouncer backend. Subclasses [LurkerClient] to inherit all the
@@ -110,6 +116,9 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         return client
     }
 
+    // Last error line surfaced per networkId, to collapse KICL's retry spam.
+    private val lastSurfacedError = mutableMapOf<Int, String>()
+
     // Stable child networkId per (soju control id, upstream network name).
     private val sojuChildIds = mutableMapOf<String, Int>()
     private var nextChildId = 100_000
@@ -186,6 +195,7 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         fun onReady(e: ClientNegotiationCompleteEvent) = post {
             networks[networkId] = Network(networkId, netName(), client.nick, true)
             connected = networks.values.any { it.connected }
+            lastSurfacedError.remove(networkId) // fresh success — arm errors again
             status = "Connected to ${netName()}"
             if (isSojuControl) {
                 // Discover the bouncer's upstream networks; each becomes its own row.
@@ -210,6 +220,56 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         fun onClosed(e: ClientConnectionClosedEvent) = post {
             networks[networkId]?.let { networks[networkId] = it.copy(connected = false) }
             connected = networks.values.any { it.connected }
+            // Surface WHY, unless KICL is going to auto-reconnect (then it's just
+            // a blip). Prefer the last-authoritative cause; fall back to generic.
+            if (!e.willAttemptReconnect()) {
+                val cause = e.cause.map { it.message ?: it.javaClass.simpleName }.orElse(null)
+                surfaceError(if (cause != null) "Disconnected: $cause" else "Disconnected from ${netName()}")
+            }
+        }
+
+        // KICL's connect() is async — a DNS/TLS/refused failure happens on a Netty
+        // thread and never reaches connectNetwork's runCatching. Catch it here so a
+        // bad host or dropped network shows a reason instead of a silent red dot.
+        @Handler
+        fun onFailed(e: ClientConnectionFailedEvent) = post {
+            networks[networkId]?.let { networks[networkId] = it.copy(connected = false) }
+            connected = networks.values.any { it.connected }
+            val cause = e.cause.map { it.message ?: it.javaClass.simpleName }.orElse("connection failed")
+            surfaceError("Couldn't connect to ${netName()}: $cause")
+        }
+
+        // Registration rejections: soju/ZNC send `464 :<reason>` (bad password/token)
+        // — plus the neighbouring auth numerics — then close. Show the reason.
+        @Handler
+        fun onNumeric(e: ClientReceiveNumericEvent) {
+            if (e.numeric !in AUTH_ERROR_NUMERICS) return
+            val reason = e.parameters.lastOrNull()?.takeIf { it.isNotBlank() }
+            post { surfaceError(reason ?: "Authentication failed (${e.numeric})") }
+        }
+
+        // A server `ERROR :<reason>` line (bouncer closeWithError, K-line, etc.).
+        @Handler
+        fun onServerError(e: ClientReceiveCommandEvent) {
+            if (!e.command.equals("ERROR", ignoreCase = true)) return
+            val reason = e.parameters.lastOrNull()?.takeIf { it.isNotBlank() } ?: return
+            post { surfaceError(reason) }
+        }
+
+        /** Post an error to the network's server buffer + status so a failure is
+         *  visible whether or not any channel buffer exists yet. KICL retries on a
+         *  timer, so collapse an identical back-to-back error (e.g. a permanently
+         *  bad host or wrong password) to one line instead of spamming the buffer. */
+        private fun surfaceError(text: String) {
+            status = text
+            if (lastSurfacedError[networkId] == text) return
+            lastSurfacedError[networkId] = text
+            val server = ensureBuffer(networkId, ":server:$networkId")
+            mergeInto(
+                server.key,
+                listOf(Msg(0, "error", "*", text, self = false, system = true)),
+                replace = false,
+            )
         }
 
         @Handler
@@ -251,17 +311,37 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         @Handler
         fun onPart(e: ChannelPartEvent) = post {
             rebuildRoster(e.channel.name)
-            if (!e.user.nick.equals(myNick(), true)) sysLine(e.channel.name, "${e.user.nick} left")
+            if (!e.user.nick.equals(myNick(), true)) {
+                val reason = e.message.takeIf { it.isNotBlank() }
+                sysLine(e.channel.name, "${e.user.nick} left" + (reason?.let { " ($it)" } ?: ""))
+            }
         }
 
+        // A quit shows in EVERY channel we share with that user (as real clients
+        // do) — check our roster before rebuilding, since rebuild drops them.
         @Handler
         fun onQuit(e: UserQuitEvent) = post {
-            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { rebuildRoster(it.target) }
+            val nick = e.user.nick
+            if (nick.equals(myNick(), true)) return@post
+            val reason = e.message.takeIf { it.isNotBlank() }
+            val line = "$nick quit" + (reason?.let { " ($it)" } ?: "")
+            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
+                val wasHere = members[b.key]?.any { it.nick.equals(nick, true) } == true
+                rebuildRoster(b.target)
+                if (wasHere) sysLine(b.target, line)
+            }
         }
 
         @Handler
         fun onNick(e: UserNickChangeEvent) = post {
-            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { rebuildRoster(it.target) }
+            val oldNick = e.oldUser.nick
+            val newNick = e.newUser.nick
+            val line = "$oldNick is now known as $newNick"
+            buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
+                val wasHere = members[b.key]?.any { it.nick.equals(oldNick, true) } == true
+                rebuildRoster(b.target)
+                if (wasHere && !oldNick.equals(myNick(), true)) sysLine(b.target, line)
+            }
         }
 
         @Handler
@@ -309,7 +389,7 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         if (!ignore.suppressNotify &&
             shouldNotify(true, b.key == activeKey, self, msg.system, msg.id > 0, appForeground)
         ) {
-            notificationSink?.invoke(NotifiableEvent(networkId, target, nick, text, dm))
+            notificationSink?.invoke(NotifiableEvent(networkId, target, nick, text, dm, msg.id))
         }
     }
 
@@ -365,6 +445,18 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
     override fun signOut() {
         manager.shutdownAll()
         super.signOut()
+    }
+
+    // Direct mode has no server settings registry — mark it loaded + empty so the
+    // Settings screen shows the device-local prefs (theme, media, biometric,
+    // background connect) instead of a scary "Settings unavailable" fetch error.
+    override fun loadSettings() {
+        post {
+            settingsRegistry.clear()
+            settingsValues.clear()
+            settingsError = null
+            settingsLoaded = true
+        }
     }
 
     // ---- Network CRUD -> local store + KiclManager ------------------------

@@ -66,6 +66,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -78,6 +79,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -103,13 +105,20 @@ import androidx.compose.ui.text.withStyle
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ModalBottomSheet
@@ -144,6 +153,8 @@ import net.amiantos.lurker.ui.theme.GlassBorder
 import net.amiantos.lurker.ui.theme.LurkerTheme
 import net.amiantos.lurker.ui.theme.TextPrimary
 import net.amiantos.lurker.ui.theme.Ui
+import androidx.compose.ui.graphics.luminance
+import net.amiantos.lurker.ui.theme.HighlightGold
 import net.amiantos.lurker.ui.theme.NoticeAmber
 import net.amiantos.lurker.ui.theme.OnlineGreen
 import net.amiantos.lurker.ui.theme.PillGray
@@ -163,6 +174,10 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -200,14 +215,14 @@ private fun glassStyle(): HazeStyle = HazeStyle(
 /** Where the app is: the buffer list, a chat, settings, DCC, or networks. */
 private sealed interface Screen {
     data object Buffers : Screen
-    data class Chat(val buffer: Buffer) : Screen
+    data class Chat(val buffer: Buffer, val scrollToMsgId: Long? = null) : Screen
     data object Settings : Screen
     data object Dcc : Screen
     data object Networks : Screen
     data object Search : Screen
     data object Friends : Screen
     data object Ignores : Screen
-    data object ChannelList : Screen
+    data class ChannelList(val query: String? = null) : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
 
@@ -225,7 +240,8 @@ class MainActivity : FragmentActivity() {
     private var sharedUri by mutableStateOf<Uri?>(null)
 
     /** (networkId, target) to open from a tapped notification, once composed. */
-    private var pendingDeepLink by mutableStateOf<Pair<Int, String>?>(null)
+    // networkId, target, and the message id to jump to (0 = just open the buffer).
+    private var pendingDeepLink by mutableStateOf<Triple<Int, String, Long>?>(null)
 
     private val notifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -240,6 +256,8 @@ class MainActivity : FragmentActivity() {
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
         Ui.chatTextScale = prefs.chatTextScale
+        Ui.clock24h = prefs.clock24h
+        Ui.highlightColor = prefs.highlightColor
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
         // as Lurker mode and start immediately; only a genuinely fresh install
@@ -297,11 +315,11 @@ class MainActivity : FragmentActivity() {
 
                 // A tapped notification opens its buffer once we're logged in.
                 LaunchedEffect(pendingDeepLink) {
-                    pendingDeepLink?.let { (nid, tgt) ->
+                    pendingDeepLink?.let { (nid, tgt, mid) ->
                         val buffer = client.focusTarget(nid, tgt)
                         client.open(buffer)
                         client.setActive(buffer)
-                        screen = Screen.Chat(buffer)
+                        screen = Screen.Chat(buffer, scrollToMsgId = mid.takeIf { it > 0 })
                         pendingDeepLink = null
                     }
                 }
@@ -347,6 +365,7 @@ class MainActivity : FragmentActivity() {
                         TabletHome(
                             client = client,
                             selectedBuffer = (active as? Screen.Chat)?.buffer,
+                            scrollToMsgId = (active as? Screen.Chat)?.scrollToMsgId,
                             sharedUri = sharedUri,
                             onShareConsumed = { sharedUri = null },
                             sharePending = sharedUri != null,
@@ -358,7 +377,7 @@ class MainActivity : FragmentActivity() {
                             onSearch = { screen = Screen.Search },
                             onFriends = { screen = Screen.Friends },
                             onIgnores = { screen = Screen.Ignores },
-                            onBrowse = { screen = Screen.ChannelList },
+                            onBrowse = { screen = Screen.ChannelList() },
                             onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                             showList = true,
                             showRoster = true,
@@ -370,12 +389,16 @@ class MainActivity : FragmentActivity() {
                         TabletHome(
                             client = client,
                             selectedBuffer = active.buffer,
+                            scrollToMsgId = active.scrollToMsgId,
                             sharedUri = sharedUri,
                             onShareConsumed = { sharedUri = null },
                             sharePending = sharedUri != null,
                             onSelect = onSelectBuffer,
                             onDeselect = { client.setActive(null); screen = Screen.Buffers },
-                            onSettings = {}, onDcc = {}, onNetworks = {},
+                            // Two-pane hides the rail (so its overflow actions are
+                            // stubbed), but the chat's top-bar gear still needs Settings.
+                            onSettings = { client.loadSettings(); screen = Screen.Settings },
+                            onDcc = {}, onNetworks = {},
                             onSearch = {}, onFriends = {}, onIgnores = {}, onBrowse = {}, onSignOut = {},
                             showList = false,
                             showRoster = true,
@@ -403,12 +426,13 @@ class MainActivity : FragmentActivity() {
                         onSearch = { screen = Screen.Search },
                         onFriends = { screen = Screen.Friends },
                         onIgnores = { screen = Screen.Ignores },
-                        onBrowse = { screen = Screen.ChannelList },
+                        onBrowse = { screen = Screen.ChannelList() },
                         onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
                         client = client,
                         buffer = s.buffer,
+                        scrollToMsgId = s.scrollToMsgId,
                         sharedUri = sharedUri,
                         onShareConsumed = { sharedUri = null },
                         onBack = { client.setActive(null); screen = Screen.Buffers },
@@ -416,6 +440,8 @@ class MainActivity : FragmentActivity() {
                             client.setActive(buffer)
                             screen = Screen.Chat(buffer)
                         },
+                        onBrowse = { q -> screen = Screen.ChannelList(q) },
+                        onSettings = { client.loadSettings(); screen = Screen.Settings },
                     )
                     Screen.Settings -> SettingsScreen(client, prefs) { screen = Screen.Buffers }
                     Screen.Dcc -> DccScreen(
@@ -450,8 +476,9 @@ class MainActivity : FragmentActivity() {
                         onBack = { screen = Screen.Buffers },
                     )
                     Screen.Ignores -> IgnoresScreen(client) { screen = Screen.Buffers }
-                    Screen.ChannelList -> ChannelListScreen(
+                    is Screen.ChannelList -> ChannelListScreen(
                         client = client,
+                        initialQuery = (screen as Screen.ChannelList).query,
                         onJoin = { networkId, chan ->
                             // Don't optimistically open — channel-joined focuses the
                             // channel we actually land in (avoids the forwarded ghost).
@@ -484,8 +511,10 @@ class MainActivity : FragmentActivity() {
     private fun consumeNotificationIntent(intent: Intent?) {
         val target = intent?.getStringExtra(Notifier.EXTRA_TARGET) ?: return
         val nid = intent.getIntExtra(Notifier.EXTRA_NETWORK_ID, -1)
-        if (nid >= 0) pendingDeepLink = nid to target
+        val mid = intent.getLongExtra(Notifier.EXTRA_MESSAGE_ID, 0L)
+        if (nid >= 0) pendingDeepLink = Triple(nid, target, mid)
         intent.removeExtra(Notifier.EXTRA_TARGET) // consume so a config change won't replay
+        intent.removeExtra(Notifier.EXTRA_MESSAGE_ID)
     }
 
     private fun consumeShareIntent(intent: Intent?) {
@@ -589,6 +618,7 @@ class MainActivity : FragmentActivity() {
 private fun TabletHome(
     client: LurkerClient,
     selectedBuffer: Buffer?,
+    scrollToMsgId: Long? = null,
     sharedUri: Uri?,
     onShareConsumed: () -> Unit,
     sharePending: Boolean,
@@ -646,10 +676,13 @@ private fun TabletHome(
                 ChatScreen(
                     client = client,
                     buffer = selectedBuffer,
+                    scrollToMsgId = scrollToMsgId,
                     sharedUri = sharedUri,
                     onShareConsumed = onShareConsumed,
                     onBack = onDeselect,
                     onOpenBuffer = onSelect,
+                    onBrowse = { onBrowse() },
+                    onSettings = onSettings,
                     // Three-pane: the rail is the persistent nav, so no back arrow.
                     // Two-pane: show the back arrow (Back returns to the list).
                     embedded = showList,
@@ -682,7 +715,7 @@ private fun TabletHome(
 private fun LockScreen(onUnlock: () -> Unit) {
     Box(Modifier.fillMaxSize().background(CanvasBlack), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("🔒", fontSize = 48.sp)
+            LockGlyph(color = TextSecondary, size = 44.dp)
             Spacer(Modifier.height(16.dp))
             Text("Lurker is locked", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(20.dp))
@@ -695,56 +728,100 @@ private fun LockScreen(onUnlock: () -> Unit) {
 
 @Composable
 private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
-    // 10.0.2.2 is the emulator's alias for the host's 127.0.0.1; 8010 is the
-    // API/WS port. Prefill from the last successful sign-in.
-    var server by remember { mutableStateOf(prefs.serverUrl ?: "http://10.0.2.2:8010") }
+    // Prefill the server + username from the last sign-in; password is never stored.
+    var server by remember { mutableStateOf(prefs.serverUrl ?: "") }
     var username by remember { mutableStateOf(prefs.username ?: "") }
     var password by remember { mutableStateOf("") }
+    var showPw by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val canSubmit = server.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !client.authBusy
+    fun submit() {
+        if (!canSubmit) return
+        scope.launch { withContext(Dispatchers.IO) { client.login(server, username, password) } }
+    }
 
-    Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
+    Box(
+        Modifier.fillMaxSize().background(CanvasBlack).imePadding(),
+        contentAlignment = Alignment.Center,
+    ) {
         Column(
-            modifier = Modifier.padding(padding).padding(24.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            Modifier
+                .widthIn(max = 440.dp)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp, vertical = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("lurker", style = MaterialTheme.typography.headlineMedium)
+            LockGlyph(color = AccentBlue, size = 40.dp)
+            Spacer(Modifier.height(16.dp))
+            Text("Sign in to Lurker", color = TextPrimary, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
             Text(
-                "Sign in with your password. The session stays put across launches.",
-                style = MaterialTheme.typography.bodySmall,
+                "Connect to your Lurker server. Your session stays signed in across launches.",
+                color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center,
             )
-            OutlinedTextField(
-                value = server,
-                onValueChange = { server = it },
-                label = { Text("Server URL") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+            Spacer(Modifier.height(26.dp))
+
+            // The hosted lurker.chat app signs in with an email at the control
+            // plane; a self-hosted server uses a username. Adapt the field labels
+            // as soon as we recognise the hosted address (CLIENT_PROTOCOL §3.2).
+            val hosted = isHostedLurker(server)
+            FormField("Server address", server) { server = it; client.clearAuthError() }
+            Text(
+                if (hosted) "Hosted Lurker — sign in with your lurker.chat email below."
+                else "e.g. chat.irc.so — https:// is added automatically.",
+                color = TextSecondary, fontSize = 11.sp,
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 3.dp),
             )
-            OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text("Username") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Spacer(Modifier.height(12.dp))
+            FormField(if (hosted) "Email" else "Username", username) { username = it; client.clearAuthError() }
+            Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = password,
-                onValueChange = { password = it },
+                onValueChange = { password = it; client.clearAuthError() },
                 label = { Text("Password") },
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                onClick = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { client.login(server, username, password) }
+                visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { submit() }),
+                trailingIcon = {
+                    TextButton(onClick = { showPw = !showPw }) {
+                        Text(if (showPw) "Hide" else "Show", color = AccentBlue, fontSize = 13.sp)
                     }
                 },
-                enabled = username.isNotBlank() && password.isNotBlank(),
-            ) { Text("Sign in") }
+                modifier = Modifier.fillMaxWidth(),
+            )
 
-            client.status?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            client.authError?.let {
+                Spacer(Modifier.height(12.dp))
+                Text(it, color = AlertRed, fontSize = 13.sp, textAlign = TextAlign.Center)
+            }
+
+            Spacer(Modifier.height(22.dp))
+            Button(
+                onClick = { submit() },
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+            ) {
+                if (client.authBusy) {
+                    CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                } else {
+                    Text("Sign in", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "No account? Ask your Lurker server's admin to create one.",
+                color = TextSecondary, fontSize = 12.sp, textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider(color = GlassBorder, modifier = Modifier.fillMaxWidth(0.6f))
+            Spacer(Modifier.height(10.dp))
+            Text("Don't use Lurker?", color = TextSecondary, fontSize = 12.sp)
+            TextButton(onClick = { prefs.clientMode = "direct"; restartAppProcess(context) }) {
+                Text("Connect directly to IRC or a bouncer", color = AccentBlue, fontSize = 14.sp)
+            }
         }
     }
 }
@@ -865,12 +942,12 @@ private fun BufferListScreen(
                 actions = {
                     // Search is a server-side feature — hidden in direct IRC mode.
                     if (client.serverFeatures) {
-                        TextButton(onClick = onSearch) { Text("🔍", fontSize = 17.sp) }
+                        TextButton(onClick = onSearch) { SearchGlyph() }
                     }
                     TextButton(onClick = { menuOpen = true }) {
                         Text("⋯", color = TextSecondary, fontSize = 22.sp)
                     }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    AppDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         // Server-only surfaces (server /LIST cache, server-synced
                         // contacts, server DCC) don't apply to a raw IRC/bouncer link.
                         if (client.serverFeatures) {
@@ -956,6 +1033,14 @@ private fun BufferListBody(
                                 pinned = client.isPinned(buffer),
                                 notifyAll = client.isNotifyAlways(buffer),
                                 showNetwork = section.network == "★ Pinned" || isFriendRow,
+                                // Green lock, matching the chat header. Prefer loaded
+                                // history (self-correcting if E2E is turned off); fall
+                                // back to the persisted known-E2E set for buffers whose
+                                // history hasn't loaded yet (fresh launch, unopened).
+                                e2e = client.messagesByBuffer[buffer.key]
+                                    ?.takeIf { it.isNotEmpty() }
+                                    ?.let { m -> m.asReversed().take(150).any { it.e2e } }
+                                    ?: (buffer.key in client.e2eSeen),
                                 online = if (isFriendRow) client.isPresent(buffer.networkId, buffer.target) else null,
                                 label = if (isFriendRow) client.friendDisplayName(buffer) else null,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
@@ -1056,6 +1141,7 @@ private fun BufferRow(
     pinned: Boolean = false,
     notifyAll: Boolean = false,
     showNetwork: Boolean = false,
+    e2e: Boolean = false,
     online: Boolean? = null,
     label: String? = null,
     onTogglePin: (() -> Unit)? = null,
@@ -1065,7 +1151,7 @@ private fun BufferRow(
 ) {
     var menu by remember { mutableStateOf(false) }
     if (onClose != null || onTogglePin != null) {
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+        AppDropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             if (onTogglePin != null) {
                 DropdownMenuItem(
                     text = { Text(if (pinned) "Unpin" else "Pin to top") },
@@ -1128,6 +1214,12 @@ private fun BufferRow(
                 )
             }
         }
+        // E2E indicator — trailing (right) side so it doesn't disrupt the name's
+        // left alignment; same green lock as the chat header.
+        if (e2e) {
+            LockGlyph(color = OnlineGreen, size = 13.dp)
+            Spacer(Modifier.width(8.dp))
+        }
         if (hasDraft) {
             Text("✎", color = TextSecondary, fontSize = 14.sp)
             Spacer(Modifier.width(8.dp))
@@ -1168,6 +1260,34 @@ private sealed interface ChatRow {
     data class Action(val msg: Msg) : ChatRow
     data class SystemLine(val msg: Msg) : ChatRow
     data object NewMessages : ChatRow
+}
+
+/** All the app's popup menus, styled once: rounded corners, the raised surface
+ *  colour, a hairline border and a soft shadow — instead of the stock sharp box. */
+@Composable
+private fun AppDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+        shape = RoundedCornerShape(16.dp),
+        containerColor = SurfaceRaised,
+        border = BorderStroke(0.5.dp, GlassBorder),
+        tonalElevation = 0.dp,
+        shadowElevation = 14.dp,
+        content = content,
+    )
+}
+
+/** The message id backing a row (-1 for the New-messages divider). */
+private fun rowMsgId(r: ChatRow): Long = when (r) {
+    is ChatRow.Bubble -> r.msg.id
+    is ChatRow.Action -> r.msg.id
+    is ChatRow.SystemLine -> r.msg.id
+    ChatRow.NewMessages -> -1L
 }
 
 /**
@@ -1213,10 +1333,15 @@ private fun buildChatRows(messages: List<Msg>, dividerAfter: Long?): List<ChatRo
 private fun ChatScreen(
     client: LurkerClient,
     buffer: Buffer,
+    scrollToMsgId: Long? = null,
     sharedUri: Uri? = null,
     onShareConsumed: () -> Unit = {},
     onBack: () -> Unit,
     onOpenBuffer: (Buffer) -> Unit,
+    // Opens the channel browser (from /list); the arg pre-seeds the search filter.
+    onBrowse: (String?) -> Unit = {},
+    // Opens Settings from the top-bar gear.
+    onSettings: () -> Unit = {},
     // The middle pane of the tablet layout: the buffer list is a persistent rail,
     // so this hides the back arrow and yields the back gesture to the host.
     embedded: Boolean = false,
@@ -1248,6 +1373,12 @@ private fun ChatScreen(
     // Message whose long-press action sheet is open, if any.
     var actionMsg by remember(buffer.key) { mutableStateOf<Msg?>(null) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
+    // Self-heal: if we land on an empty buffer (e.g. a notification opened it while
+    // the socket was still reconnecting, so the initial open() was dropped),
+    // re-request its history once we're connected.
+    LaunchedEffect(client.connected, buffer.key, messages.isEmpty()) {
+        if (client.connected && messages.isEmpty() && buffer.networkId != null) client.open(buffer)
+    }
     // No "channel is encrypted" frame exists; infer from recent E2E traffic.
     val e2eActive = remember(messages.size) { messages.takeLast(200).any { it.e2e } }
     val divider = client.dividerAfter[buffer.key]
@@ -1274,6 +1405,21 @@ private fun ChatScreen(
     }
     val uploadPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) uploadIntoDraft(uri)
+    }
+    // Camera capture: hand the camera app a FileProvider write URI, then push the
+    // resulting photo through the exact same upload path as a picked file.
+    var pendingPhotoUri by remember { mutableStateOf<Uri?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val uri = pendingPhotoUri
+        pendingPhotoUri = null
+        if (ok && uri != null) uploadIntoDraft(uri)
+    }
+    fun launchCamera() {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        val file = File(dir, "photo_${System.currentTimeMillis()}.jpg")
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        pendingPhotoUri = uri
+        cameraLauncher.launch(uri)
     }
     // A share-sheet file lands here once a buffer is chosen.
     LaunchedEffect(sharedUri) {
@@ -1378,10 +1524,28 @@ private fun ChatScreen(
     // position), the moment its rows populate. After that, live messages only
     // follow the tail if you're already at the bottom — so you never fight it.
     var openScrollDone by remember(buffer.key) { mutableStateOf(false) }
-    LaunchedEffect(buffer.key, rows.isNotEmpty()) {
-        if (!openScrollDone && rows.isNotEmpty()) {
-            listState.scrollToItem(rows.lastIndex + headerCount)
-            openScrollDone = true
+    // A tapped notification asks to jump to a specific message; flash it briefly so
+    // the eye lands on it. Reset when the buffer or requested id changes.
+    var scrolledToTarget by remember(buffer.key, scrollToMsgId) { mutableStateOf(false) }
+    var flashMsgId by remember(buffer.key) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(flashMsgId) { if (flashMsgId != null) { delay(2400); flashMsgId = null } }
+    LaunchedEffect(buffer.key, rows.size, scrollToMsgId) {
+        if (rows.isEmpty()) return@LaunchedEffect
+        val targetIdx = if (scrollToMsgId != null && !scrolledToTarget)
+            rows.indexOfFirst { rowMsgId(it) == scrollToMsgId } else -1
+        when {
+            // Jump straight to the notification's message once it's loaded.
+            targetIdx >= 0 -> {
+                listState.scrollToItem(targetIdx + headerCount)
+                openScrollDone = true
+                scrolledToTarget = true
+                flashMsgId = scrollToMsgId
+            }
+            // Normal open: land at the newest message, once.
+            !openScrollDone -> {
+                listState.scrollToItem(rows.lastIndex + headerCount)
+                openScrollDone = true
+            }
         }
     }
     // Follow the tail only when the tail itself changed — a prepend of older
@@ -1398,6 +1562,21 @@ private fun ChatScreen(
         if (mediaTick > 0 && openScrollDone && anchorId == null && atBottom) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
+    }
+    // Returning to the app must not strand a reader who was at the tail: some
+    // resumes trigger a history re-sync that shifts the list, drifting the view
+    // upward. Re-pin to the newest row on resume — but only if we were already
+    // at the bottom, so a deliberately scrolled-up reader is left alone.
+    val resumeScope = rememberCoroutineScope()
+    LifecycleResumeEffect(buffer.key) {
+        if (openScrollDone && anchorId == null && atBottom) {
+            resumeScope.launch {
+                delay(80) // let any resume-time re-sync settle before pinning
+                val n = listState.layoutInfo.totalItemsCount
+                if (n > 0) listState.scrollToItem(n - 1)
+            }
+        }
+        onPauseOrDispose { }
     }
     // Older page landed: put the previously-oldest row back under the finger.
     LaunchedEffect(oldestId) {
@@ -1469,6 +1648,7 @@ private fun ChatScreen(
                         onMediaLoaded = { mediaTick++ },
                         onAction = { actionMsg = it },
                         onSwipeReply = { replyTo(it) },
+                        flash = row.msg.id == flashMsgId,
                     )
                     is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
@@ -1519,14 +1699,14 @@ private fun ChatScreen(
                             ConnectionDot(client.connected)
                             Spacer(Modifier.width(7.dp))
                             if (e2eActive) {
-                                Text("🔒", fontSize = 12.sp)
+                                LockGlyph(color = OnlineGreen, size = 13.dp)
                                 Spacer(Modifier.width(4.dp))
                             }
                             Text(buffer.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.width(5.dp))
                             Text("⌄", color = TextSecondary, fontSize = 13.sp)
                         }
-                        DropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
+                        AppDropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
                             DropdownMenuItem(
                                 text = { Text("Encryption (E2E)", color = OnlineGreen) },
                                 onClick = { titleMenu = false; showE2e = true; client.execute(buffer, listOf(WireOp("e2e", target = buffer.target, line = "status"))) },
@@ -1551,12 +1731,18 @@ private fun ChatScreen(
                     if (buffer.isChannel && showMembersButton) {
                         val count = client.members[buffer.key]?.size ?: 0
                         TextButton(onClick = { showMembers = true }) {
-                            Text(
-                                if (count > 0) "☰ $count" else "☰",
-                                color = TextSecondary,
-                                fontSize = 15.sp,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                MembersGlyph(color = TextSecondary, size = 16.dp)
+                                if (count > 0) {
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("$count", color = TextSecondary, fontSize = 15.sp)
+                                }
+                            }
                         }
+                    }
+                    // Quick Settings access without going back to the buffer list.
+                    IconButton(onClick = onSettings) {
+                        SettingsGlyph(color = TextSecondary, size = 20.dp)
                     }
                 },
             )
@@ -1628,7 +1814,8 @@ private fun ChatScreen(
                     },
                     target = buffer.displayName,
                     uploading = client.uploading,
-                    onAttach = { uploadPicker.launch("*/*") },
+                    onPickFile = { uploadPicker.launch("*/*") },
+                    onTakePhoto = { launchCamera() },
                     suggestions = suggestions,
                     onPickSuggestion = { draft = applySuggestion(it); client.setDraftLocal(buffer, draft.text) },
                 ) {
@@ -1646,6 +1833,14 @@ private fun ChatScreen(
                             }
                         }
                         is ParsedInput.Local -> client.localNotice(buffer, parsed.message)
+                        is ParsedInput.Browse ->
+                            // Lurker has a rich channel browser; direct mode falls back
+                            // to a raw LIST (results land in the server buffer).
+                            if (client.serverFeatures) onBrowse(parsed.query)
+                            else client.execute(
+                                buffer,
+                                listOf(WireOp("raw", line = "LIST" + (parsed.query?.let { " $it" } ?: ""))),
+                            )
                     }
                     draft = TextFieldValue("")
                     client.setDraftLocal(buffer, "") // clears + syncs draft-clear
@@ -1746,12 +1941,18 @@ private fun E2eSheet(
         containerColor = SurfaceDark.copy(alpha = SurfaceDark.alpha.coerceAtLeast(0.94f)),
     ) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-            Text(
-                "🔒 Encryption — ${buffer.displayName}",
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(bottom = 4.dp),
-            )
+            ) {
+                LockGlyph(color = OnlineGreen, size = 15.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Encryption — ${buffer.displayName}",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+            }
             Text(
                 "End-to-end encryption is handled by your Lurker server. These are the handshake and status lines for this buffer.",
                 color = TextSecondary,
@@ -2003,7 +2204,14 @@ private fun MemberActions(
             }
         }
         client.nickNote(networkId, nick)?.let { note ->
-            Text("📝 $note", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 26.dp, vertical = 4.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 26.dp, vertical = 4.dp),
+            ) {
+                NoteGlyph(color = TextSecondary, size = 13.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(note, color = TextSecondary, fontSize = 13.sp)
+            }
         }
         SheetAction("Whois") { raw("WHOIS $nick") }
         SheetAction("Send a message") {
@@ -2168,6 +2376,7 @@ private fun MessageBubble(
     onMediaLoaded: () -> Unit = {},
     onAction: ((Msg) -> Unit)? = null,
     onSwipeReply: ((Msg) -> Unit)? = null,
+    flash: Boolean = false,
 ) {
     val self = msg.self
     // Swipe a bubble sideways to reply (reuses the long-press reply seam). The
@@ -2187,6 +2396,12 @@ private fun MessageBubble(
     // one group is tightened, the outside stays fully rounded.
     val big = 18.dp
     val tight = 5.dp
+    // Vertical rhythm scales with the chat font so small fonts don't read as
+    // paradoxically airy (d3fc0n1's note): at the default baseSize 16 these
+    // resolve to today's exact values (7 / 8 / 2), only the extremes shift.
+    val vPad = (baseSize * 0.44f).dp      // inner bubble top+bottom
+    val groupTop = (baseSize * 0.5f).dp   // gap above a new sender group
+    val lineTop = (baseSize * 0.13f).dp   // gap between lines in one group
     val shape = RoundedCornerShape(
         topStart = if (!self && !first) tight else big,
         topEnd = if (self && !first) tight else big,
@@ -2227,7 +2442,7 @@ private fun MessageBubble(
             .padding(
                 start = if (self) 64.dp else 12.dp,
                 end = if (self) 12.dp else 64.dp,
-                top = if (first) 8.dp else 2.dp,
+                top = if (first) groupTop else lineTop,
                 bottom = 1.dp,
             ),
     ) {
@@ -2243,10 +2458,22 @@ private fun MessageBubble(
         // A message fully painted with one mIRC background becomes a bubble of
         // that color instead of colored stripes inside a gray bubble.
         val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
+        // Highlight (a mention of you) gets a gold bubble; a notification jump
+        // flashes the same gold so the eye lands on it. Never recolour your own
+        // messages or a fully mIRC-painted one.
+        val goldHighlight = !self && paintedBg == null && (msg.matched || flash)
+        val highlightBg = if (Ui.highlightColor != 0) Color(Ui.highlightColor) else HighlightGold
         Box(
             Modifier
                 .clip(shape)
-                .background(paintedBg ?: if (self) AccentBlue else SurfaceRaised, shape)
+                .background(
+                    paintedBg ?: when {
+                        goldHighlight -> highlightBg
+                        self -> AccentBlue
+                        else -> SurfaceRaised
+                    },
+                    shape,
+                )
                 // Long-press opens the message action sheet. onClick is a no-op so
                 // link/media taps inside the text still reach their own handlers.
                 .then(
@@ -2254,7 +2481,7 @@ private fun MessageBubble(
                         Modifier.combinedClickable(onClick = {}, onLongClick = { onAction(msg) })
                     } else Modifier,
                 )
-                .padding(horizontal = 13.dp, vertical = 7.dp),
+                .padding(horizontal = 13.dp, vertical = vPad),
         ) {
             val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink)
             Text(
@@ -2263,6 +2490,8 @@ private fun MessageBubble(
                 } else body,
                 color = when {
                     self -> Color.White
+                    // Keep text readable on whatever highlight colour was chosen.
+                    goldHighlight -> if (highlightBg.luminance() > 0.55f) Color(0xFF1C1C1E) else Color.White
                     msg.type == "notice" -> NoticeAmber
                     else -> TextPrimary
                 },
@@ -2282,19 +2511,27 @@ private fun MessageBubble(
             }
         }
         if (last) {
-            Text(
-                // 🔒 marks an end-to-end-encrypted message (the web client
-                // carries the flag but never shows it — we do).
-                (if (msg.e2e) "🔒 " else "") + (formatTime(msg.time) ?: ""),
-                color = if (msg.e2e) OnlineGreen else TextSecondary,
-                fontSize = (baseSize - 5).sp,
+            // A drawn lock marks an end-to-end-encrypted message (the web client
+            // carries the flag but never shows it — we do).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(
                     start = if (self) 0.dp else 14.dp,
                     end = if (self) 6.dp else 0.dp,
                     top = 3.dp,
                     bottom = 5.dp,
                 ),
-            )
+            ) {
+                if (msg.e2e) {
+                    LockGlyph(color = OnlineGreen, size = (baseSize - 4).dp)
+                    Spacer(Modifier.width(3.dp))
+                }
+                Text(
+                    formatTime(msg.time) ?: "",
+                    color = if (msg.e2e) OnlineGreen else TextSecondary,
+                    fontSize = (baseSize - 5).sp,
+                )
+            }
         }
     }
 }
@@ -2312,7 +2549,8 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)?
         line,
         fontSize = (baseSize - 2).sp,
         color = TextPrimary,
-        modifier = Modifier.fillMaxWidth().padding(16.dp, 5.dp),
+        // Vertical padding tracks the font (default 16 → 5.dp), matching bubbles.
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = (baseSize * 0.31f).dp),
     )
 }
 
@@ -2670,19 +2908,21 @@ private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
                     color = if (warn) AlertRed else OnlineGreen,
                     fontWeight = FontWeight.Bold,
                 ),
-            ) { append("🔒 E2E  ") }
+            ) { append("E2E  ") }
             append(msg.text)
         }
-        Text(
-            line,
-            fontSize = 12.sp,
-            color = if (warn) AlertRed else TextSecondary,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp, 4.dp)
                 .background(SurfaceDark, RoundedCornerShape(8.dp))
                 .padding(12.dp, 7.dp),
-        )
+        ) {
+            LockGlyph(color = if (warn) AlertRed else OnlineGreen, size = 13.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(line, fontSize = 12.sp, color = if (warn) AlertRed else TextSecondary)
+        }
         return
     }
     if (msg.type == "system") {
@@ -2796,7 +3036,8 @@ private fun Composer(
     onChange: (TextFieldValue) -> Unit,
     target: String,
     uploading: Boolean = false,
-    onAttach: (() -> Unit)? = null,
+    onPickFile: (() -> Unit)? = null,
+    onTakePhoto: (() -> Unit)? = null,
     suggestions: List<String> = emptyList(),
     onPickSuggestion: (String) -> Unit = {},
     onSend: () -> Unit,
@@ -2831,18 +3072,38 @@ private fun Composer(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             // Compact glyph buttons (not TextButtons) so the input gets the room.
-            if (onAttach != null) {
-                Box(
-                    Modifier.size(34.dp).clip(CircleShape)
-                        .clickable(enabled = !uploading, onClick = onAttach)
-                        .semantics { contentDescription = "Attach a file"; role = Role.Button },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (uploading) "…" else "+",
-                        color = if (uploading) TextSecondary else AccentBlue,
-                        fontSize = 24.sp,
-                    )
+            // The + opens a small menu: take a photo, or pick an existing file.
+            if (onPickFile != null || onTakePhoto != null) {
+                var showAttachMenu by remember { mutableStateOf(false) }
+                Box {
+                    Box(
+                        Modifier.size(34.dp).clip(CircleShape)
+                            .clickable(enabled = !uploading) { showAttachMenu = true }
+                            .semantics { contentDescription = "Attach"; role = Role.Button },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            if (uploading) "…" else "+",
+                            color = if (uploading) TextSecondary else AccentBlue,
+                            fontSize = 24.sp,
+                        )
+                    }
+                    AppDropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
+                        if (onTakePhoto != null) {
+                            DropdownMenuItem(
+                                text = { Text("Take photo", color = TextPrimary) },
+                                leadingIcon = { CameraGlyph(color = TextPrimary, size = 18.dp) },
+                                onClick = { showAttachMenu = false; onTakePhoto() },
+                            )
+                        }
+                        if (onPickFile != null) {
+                            DropdownMenuItem(
+                                text = { Text("Choose file", color = TextPrimary) },
+                                leadingIcon = { FolderGlyph(color = TextPrimary, size = 18.dp) },
+                                onClick = { showAttachMenu = false; onPickFile() },
+                            )
+                        }
+                    }
                 }
             }
             Box(
@@ -2881,11 +3142,7 @@ private fun Composer(
                     .semantics { contentDescription = "Send message"; role = Role.Button },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    "➤",
-                    color = if (canSend) AccentBlue else TextSecondary,
-                    fontSize = 20.sp,
-                )
+                SendGlyph(color = if (canSend) AccentBlue else TextSecondary, size = 19.dp)
             }
         }
     }
@@ -2903,11 +3160,14 @@ private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit)
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        FormatKey("B", bold = true) { onChange(applyFormat(draft, Fmt.BOLD)) }
-        FormatKey("I", italic = true) { onChange(applyFormat(draft, Fmt.ITALIC)) }
-        FormatKey("U", underline = true) { onChange(applyFormat(draft, Fmt.UNDERLINE)) }
-        FormatKey("S", strike = true) { onChange(applyFormat(draft, Fmt.STRIKE)) }
-        FormatKey("M", mono = true) { onChange(applyFormat(draft, Fmt.MONO)) }
+        // Which toggles are "open" at the cursor, so the buttons light up while
+        // you're typing bold/italic/etc. (you can't see the invisible codes).
+        val open = Fmt.openTogglesAt(draft.text, draft.selection.start)
+        FormatKey("B", bold = true, active = Fmt.BOLD in open) { onChange(applyFormat(draft, Fmt.BOLD)) }
+        FormatKey("I", italic = true, active = Fmt.ITALIC in open) { onChange(applyFormat(draft, Fmt.ITALIC)) }
+        FormatKey("U", underline = true, active = Fmt.UNDERLINE in open) { onChange(applyFormat(draft, Fmt.UNDERLINE)) }
+        FormatKey("S", strike = true, active = Fmt.STRIKE in open) { onChange(applyFormat(draft, Fmt.STRIKE)) }
+        FormatKey("M", mono = true, active = Fmt.MONO in open) { onChange(applyFormat(draft, Fmt.MONO)) }
         Box {
             // Color entry point: a rainbow chip that opens the classic palette.
             Box(
@@ -2925,7 +3185,7 @@ private fun FormatBar(draft: TextFieldValue, onChange: (TextFieldValue) -> Unit)
                     )
                     .clickable { showColors = true },
             )
-            DropdownMenu(expanded = showColors, onDismissRequest = { showColors = false }) {
+            AppDropdownMenu(expanded = showColors, onDismissRequest = { showColors = false }) {
                 Column(Modifier.padding(10.dp)) {
                     // Text vs Fill: fill inserts a fg,bg pair (fg = last-picked
                     // text color, else a contrast-safe black/white).
@@ -2989,19 +3249,20 @@ private fun FormatKey(
     underline: Boolean = false,
     strike: Boolean = false,
     mono: Boolean = false,
+    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     Box(
         Modifier
             .size(36.dp)
-            .background(SurfaceDark, RoundedCornerShape(8.dp))
+            .background(if (active) AccentBlue else SurfaceDark, RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             label,
             fontSize = 15.sp,
-            color = TextPrimary,
+            color = if (active) CanvasBlack else TextPrimary,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
             fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
             fontFamily = if (mono) FontFamily.Monospace else null,
@@ -3107,23 +3368,32 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
             !client.settingsLoaded ->
                 Box(Modifier.padding(padding).fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
 
-            client.settingsRegistry.isEmpty() -> Column(Modifier.padding(padding).padding(24.dp)) {
-                Text(client.settingsError ?: "No settings available on this server.")
-            }
-
             category == null -> LazyColumn(Modifier.padding(padding).fillMaxSize()) {
                 client.settingsError?.let { err ->
                     item { Text(err, color = AlertRed, modifier = Modifier.padding(16.dp)) }
                 }
                 item { Spacer(Modifier.height(8.dp)) }
+                // Device-local settings always render — they're this device's Prefs,
+                // not the server's registry, so they exist in direct mode too.
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
+                item { ClockFormatCard(prefs) }
+                item { HighlightColorCard(prefs) }
                 item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
                 item { BackgroundConnectCard(prefs) }
                 item { ConnectionModeCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
                 if (client.serverExtended) item { AliasesCard(client) }
+                // No server-side registry (direct mode, or a server without it).
+                if (orderedCategories.isEmpty() && client.settingsError == null) item {
+                    Text(
+                        "Server-side chat settings aren't available in this mode.",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(16.dp, 12.dp),
+                    )
+                }
                 items(orderedCategories.size) { i ->
                     val cat = orderedCategories[i]
                     val label = CATEGORY_META.firstOrNull { it.first == cat }?.second
@@ -3272,6 +3542,81 @@ private fun InlineMediaCard(prefs: Prefs) {
                 checked = Ui.inlineMedia,
                 onCheckedChange = { Ui.inlineMedia = it; prefs.inlineMedia = it },
             )
+        }
+    }
+}
+
+@Composable
+private fun ClockFormatCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("24-hour time", fontSize = 17.sp)
+                Text(
+                    "Show message times as ${if (Ui.clock24h) "14:05" else "2:05 PM"}.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = Ui.clock24h,
+                onCheckedChange = { Ui.clock24h = it; prefs.clock24h = it },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HighlightColorCard(prefs: Prefs) {
+    // 0 = theme-default gold; the rest are muted bubble fills.
+    val swatches = listOf(
+        0, 0xFF4A3B12.toInt(), 0xFF6A4E12.toInt(), 0xFF1E4620.toInt(), 0xFF13424A.toInt(),
+        0xFF1E3A5C.toInt(), 0xFF3A2456.toInt(), 0xFF4E2440.toInt(), 0xFF5A2020.toInt(),
+        0xFFFDECB8.toInt(),
+    )
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp, 12.dp)) {
+            Text("Highlight colour", fontSize = 17.sp)
+            Text(
+                "Bubble colour for messages that mention you. First swatch = default gold.",
+                color = TextSecondary, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                swatches.forEach { argb ->
+                    val selected = Ui.highlightColor == argb
+                    val shown = if (argb == 0) HighlightGold else Color(argb)
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(shown, CircleShape)
+                            .border(
+                                if (selected) 2.5.dp else 0.5.dp,
+                                if (selected) AccentBlue else GlassBorder,
+                                CircleShape,
+                            )
+                            .clickable { Ui.highlightColor = argb; prefs.highlightColor = argb },
+                    )
+                }
+            }
         }
     }
 }
@@ -3541,7 +3886,7 @@ private fun EnumSetting(option: SettingOption, current: String?, onPick: (String
         Text(option.label, modifier = Modifier.weight(1f))
         Box {
             TextButton(onClick = { open = true }) { Text(current ?: "—") }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            AppDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 option.choices.forEach { choice ->
                     DropdownMenuItem(text = { Text(choice) }, onClick = { open = false; onPick(choice) })
                 }
@@ -3698,7 +4043,7 @@ private fun NetworkEditScreen(client: LurkerClient, config: NetworkConfig?, onBa
     // Direct-mode endpoint type: a plain network, or a soju bouncer (which
     // auto-discovers its upstream networks). Only meaningful in direct mode.
     val directMode = !client.serverFeatures
-    var endpointType by remember { mutableStateOf("direct") }
+    var endpointType by remember { mutableStateOf(config?.type ?: "direct") }
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -3846,6 +4191,10 @@ private fun FormField(
         visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
         keyboardOptions = KeyboardOptions(
             keyboardType = if (number) KeyboardType.Number else KeyboardType.Text,
+            // These fields are URLs / nicks / hosts — never auto-capitalise or
+            // autocorrect them (that's what turned "https" into "Https").
+            capitalization = KeyboardCapitalization.None,
+            autoCorrect = false,
         ),
         modifier = Modifier.fillMaxWidth(),
     )
@@ -3990,19 +4339,20 @@ private fun ResultRow(client: LurkerClient, r: SearchResult, onOpen: (Int, Strin
 @Composable
 private fun ChannelListScreen(
     client: LurkerClient,
+    initialQuery: String? = null,
     onJoin: (Int, String) -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val connected = remember(client.networks.toMap()) { client.networks.values.filter { it.connected } }
     var networkId by remember(connected.map { it.id }) { mutableStateOf(connected.firstOrNull()?.id) }
-    var query by remember { mutableStateOf("") }
+    var query by remember { mutableStateOf(initialQuery ?: "") }
     var sortByUsers by remember { mutableStateOf(true) }
     var netMenu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(networkId) { networkId?.let { client.openChannelList(it) } }
-    LaunchedEffect(query, sortByUsers) {
+    LaunchedEffect(query, sortByUsers, networkId) {
         kotlinx.coroutines.delay(300)
         if (networkId != null) client.searchChannelList(query, if (sortByUsers) "users" else "name", "desc", 0)
     }
@@ -4038,7 +4388,7 @@ private fun ChannelListScreen(
                     TextButton(onClick = { netMenu = true }) {
                         Text(connected.firstOrNull { it.id == networkId }?.name ?: "Network", color = AccentBlue)
                     }
-                    DropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
+                    AppDropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
                         connected.forEach { n -> DropdownMenuItem(text = { Text(n.name) }, onClick = { networkId = n.id; netMenu = false }) }
                     }
                 }
@@ -4351,7 +4701,7 @@ private fun DccStartCard(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit) {
                             color = AccentBlue,
                         )
                     }
-                    DropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
+                    AppDropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
                         connected.forEach { n ->
                             DropdownMenuItem(
                                 text = { Text(n.name) },

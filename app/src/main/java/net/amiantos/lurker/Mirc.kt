@@ -35,6 +35,30 @@ object Fmt {
 
     /** Foreground + background pair: "FF,BB". mIRC requires a fg with bg. */
     fun colorPair(fg: Int, bg: Int): String = COLOR + "%02d,%02d".format(fg, bg)
+
+    /**
+     * Which toggle formats are "open" at [cursor] — i.e. text typed there would
+     * carry them. Each toggle char flips its own state; RESET clears all. Drives
+     * the composer's active-button highlight so you can SEE you're typing bold
+     * (a #lurker-spooky ask — the control codes are invisible otherwise).
+     */
+    fun openTogglesAt(text: String, cursor: Int): Set<String> {
+        var bold = false; var italic = false; var underline = false; var strike = false; var mono = false
+        for (i in 0 until cursor.coerceIn(0, text.length)) {
+            when (text[i]) {
+                BOLD[0] -> bold = !bold
+                ITALIC[0] -> italic = !italic
+                UNDERLINE[0] -> underline = !underline
+                STRIKE[0] -> strike = !strike
+                MONO[0] -> mono = !mono
+                RESET[0] -> { bold = false; italic = false; underline = false; strike = false; mono = false }
+            }
+        }
+        return buildSet {
+            if (bold) add(BOLD); if (italic) add(ITALIC); if (underline) add(UNDERLINE)
+            if (strike) add(STRIKE); if (mono) add(MONO)
+        }
+    }
 }
 
 /** A run of text sharing one visual style. `fg`/`bg` are ARGB ints or null. */

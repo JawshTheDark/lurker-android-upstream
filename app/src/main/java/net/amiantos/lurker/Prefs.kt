@@ -56,6 +56,22 @@ class Prefs(context: Context) {
         get() = sp.getInt("chatTextScale", 0)
         set(value) = sp.edit { putInt("chatTextScale", value) }
 
+    /** Show message timestamps in 24-hour time (default off = 12-hour). */
+    var clock24h: Boolean
+        get() = sp.getBoolean("clock24h", false)
+        set(value) = sp.edit { putBoolean("clock24h", value) }
+
+    /** Highlight-message bubble colour (ARGB int). 0 = theme default (gold). */
+    var highlightColor: Int
+        get() = sp.getInt("highlightColor", 0)
+        set(value) = sp.edit { putInt("highlightColor", value) }
+
+    /** Buffer keys known to carry E2E — drives the sidebar lock before a buffer's
+     *  history is loaded. (SharedPreferences returns an unmodifiable set; copy.) */
+    var e2eBuffers: Set<String>
+        get() = sp.getStringSet("e2eBuffers", emptySet())?.toSet() ?: emptySet()
+        set(value) = sp.edit { putStringSet("e2eBuffers", value) }
+
     /** Require a biometric / device-credential unlock to open the app (default off). */
     var biometricLock: Boolean
         get() = sp.getBoolean("biometricLock", false)

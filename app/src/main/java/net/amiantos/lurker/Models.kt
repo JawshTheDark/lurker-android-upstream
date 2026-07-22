@@ -40,6 +40,9 @@ data class Msg(
     val level: String? = null,
     /** True when this message arrived end-to-end encrypted (server-decrypted). */
     val e2e: Boolean = false,
+    /** True when this message matched a highlight rule (a mention / your nick) —
+     *  drives the gold highlight background. */
+    val matched: Boolean = false,
 )
 
 /** An inbound DCC file transfer, mirrored from the server's transfer rows. */
@@ -76,6 +79,9 @@ data class NotifiableEvent(
     val nick: String,
     val text: String,
     val isDm: Boolean,
+    /** Id of the message that triggered this — lets a tapped notification jump
+     *  straight to it (0 if unknown). */
+    val msgId: Long = 0,
 )
 
 /** One reachable identity (network + nick) for a contact. */
@@ -186,6 +192,8 @@ data class NetworkConfig(
     val hasSaslPassword: Boolean,
     val saslAccount: String?,
     val blocked: Boolean,
+    /** Direct-mode endpoint kind ("direct" | "soju" | "znc"); ignored in Lurker mode. */
+    val type: String = "direct",
 )
 
 /**

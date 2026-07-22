@@ -39,6 +39,18 @@
             </intent-filter>
         </activity>
 
+        <!-- Grants the camera app a write URI for the in-composer "Take photo"
+             capture; authority is per-flavor so both identities coexist. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Opt-in background liveness anchor (Prefs.backgroundConnect). Holds no
              socket of its own; keeps the process alive so the shared client's
              WebSocket stays connected for background notifications. -->

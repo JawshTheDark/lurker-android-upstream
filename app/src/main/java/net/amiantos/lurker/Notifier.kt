@@ -29,6 +29,7 @@ object Notifier {
     private const val CHANNEL_SERVICE_OLD = "connection"
     const val EXTRA_NETWORK_ID = "lurker.networkId"
     const val EXTRA_TARGET = "lurker.target"
+    const val EXTRA_MESSAGE_ID = "lurker.messageId"
 
     fun ensureChannels(context: Context) {
         val mgr = context.getSystemService(NotificationManager::class.java) ?: return
@@ -58,6 +59,7 @@ object Notifier {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             e.networkId?.let { putExtra(EXTRA_NETWORK_ID, it) }
             putExtra(EXTRA_TARGET, e.target)
+            if (e.msgId > 0) putExtra(EXTRA_MESSAGE_ID, e.msgId)
         }
         val pi = PendingIntent.getActivity(
             context,

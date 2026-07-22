@@ -32,6 +32,12 @@ object Ui {
     /** Device-local sp added to the synced chat font size (0 = server default).
      *  Handy on tablets, where the mobile default reads tiny on a big screen. */
     var chatTextScale by mutableStateOf(0)
+
+    /** Show message timestamps in 24-hour time (14:05) instead of 12-hour (2:05 PM). */
+    var clock24h by mutableStateOf(false)
+
+    /** Highlight-bubble colour override (ARGB); 0 = theme default gold. */
+    var highlightColor by mutableStateOf(0)
 }
 
 private data class Palette(
@@ -46,6 +52,7 @@ private data class Palette(
     val textSecondary: Color,
     val amber: Color,
     val green: Color,
+    val highlight: Color, // gold bubble fill for mentions/highlights
     val dark: Boolean,
 )
 
@@ -63,6 +70,7 @@ private val OledPalette = Palette(
     textSecondary = Color(0xFF98989F),
     amber = Color(0xFFFFD60A),
     green = Color(0xFF30D158),
+    highlight = Color(0xFF4A3B12),
     dark = true,
 )
 
@@ -79,6 +87,7 @@ private val DarkPalette = Palette(
     textSecondary = Color(0xFFA0A0AE),
     amber = Color(0xFFFFD60A),
     green = Color(0xFF30D158),
+    highlight = Color(0xFF4C4526),
     dark = true,
 )
 
@@ -96,6 +105,7 @@ private val LightPalette = Palette(
     textSecondary = Color(0xFF6C6C72),
     amber = Color(0xFF9A6B00), // amber text needs contrast on white glass
     green = Color(0xFF34C759),
+    highlight = Color(0xFFFDECB8), // light gold, distinct from the grey received bubble
     dark = false,
 )
 
@@ -120,6 +130,7 @@ val TextPrimary: Color get() = palette.textPrimary
 val TextSecondary: Color get() = palette.textSecondary
 val NoticeAmber: Color get() = palette.amber
 val OnlineGreen: Color get() = palette.green
+val HighlightGold: Color get() = palette.highlight
 
 @Composable
 fun LurkerTheme(content: @Composable () -> Unit) {

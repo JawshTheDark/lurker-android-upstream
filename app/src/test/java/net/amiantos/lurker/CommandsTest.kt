@@ -149,4 +149,20 @@ class CommandsTest {
         assertEquals("/whois bob", Commands.expandAlias("/whois bob", emptyList(), "me", "#x"))
     }
 
+    @Test
+    fun listOpensBrowserWithNoFilter() {
+        val r = Commands.parse("/list", "#chan", hasNetwork = true)
+        assertTrue(r is ParsedInput.Browse && r.query == null)
+    }
+
+    @Test
+    fun listCarriesFilter() {
+        val r = Commands.parse("/list *linux*", "#chan", hasNetwork = true)
+        assertTrue(r is ParsedInput.Browse && r.query == "*linux*")
+    }
+
+    @Test
+    fun channelsIsAliasForList() {
+        assertTrue(Commands.parse("/channels", "#chan", hasNetwork = true) is ParsedInput.Browse)
+    }
 }

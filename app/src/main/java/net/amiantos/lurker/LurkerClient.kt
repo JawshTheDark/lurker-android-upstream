@@ -51,11 +51,21 @@ open class LurkerClient {
     var connected by mutableStateOf(false)
         protected set
 
+    // Login-box state: a spinner flag and a human error (null while fine).
+    var authBusy by mutableStateOf(false)
+        protected set
+    var authError by mutableStateOf<String?>(null)
+        protected set
+
     val networks = mutableStateMapOf<Int, Network>()
     val buffers = mutableStateListOf<Buffer>()
 
     /** bufferKey -> messages, in id order. */
     val messagesByBuffer = mutableStateMapOf<String, List<Msg>>()
+
+    /** Buffer keys ever seen carrying E2E traffic — drives the sidebar lock even
+     *  before a buffer's history loads. Seeded from Prefs, updated at ingestion. */
+    val e2eSeen = mutableStateListOf<String>()
 
     /** bufferKey -> unread / highlight counts for badges. */
     val unread = mutableStateMapOf<String, Int>()
@@ -133,6 +143,11 @@ open class LurkerClient {
     var chanlistTotalCount by mutableStateOf(0)
     private var chanlistKey = "" // (query,sortBy,sortDir) guard
     private var chanlistNetworkId = -1
+    // Last search args, so a live /LIST refresh (chanlist-progress/-end) can
+    // re-poll the freshly-cached rows without the UI re-issuing the request.
+    private var chanlistQuery = ""
+    private var chanlistSortBy = "users"
+    private var chanlistSortDir = "desc"
 
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
@@ -182,7 +197,7 @@ open class LurkerClient {
     val settingsValues = mutableStateMapOf<String, Any?>()
     var settingsError by mutableStateOf<String?>(null)
     var settingsLoaded by mutableStateOf(false)
-        private set
+        protected set
 
     // ---- Internals --------------------------------------------------------
     private val http = OkHttpClient.Builder()
@@ -232,6 +247,8 @@ open class LurkerClient {
         if (started) { this.prefs = prefs; return }
         started = true
         this.prefs = prefs
+        // Seed known-E2E buffers so the sidebar lock shows immediately on launch.
+        prefs.e2eBuffers.forEach { if (it !in e2eSeen) e2eSeen.add(it) }
         if (prefs.hasSession) {
             token = prefs.token
             baseUrl = prefs.serverUrl!!.trimEnd('/')
@@ -248,35 +265,76 @@ open class LurkerClient {
      * POST /api/auth/login/token — password in, bearer session token out. Blocking;
      * the caller runs it off the main thread.
      */
+    /** Clear the login-box error (called as the user edits a field). */
+    fun clearAuthError() { if (authError != null) authError = null }
+
     fun login(rawBase: String, username: String, password: String) {
-        val base = rawBase.trim().trimEnd('/')
+        // The hosted lurker.chat deployment mints its token at the control plane
+        // with an EMAIL, not a username, and then proxies all chat traffic through
+        // app.lurker.chat (CLIENT_PROTOCOL §3.2). Self-hosted servers keep the
+        // username → /api/auth/login/token flow. Detect which we're talking to
+        // from the address the user typed and branch the request accordingly.
+        val hosted = isHostedLurker(rawBase)
+        val base = if (hosted) HOSTED_LURKER_BASE else normalizeServerUrl(rawBase)
         baseUrl = base
-        post { status = "Signing in…" }
+        post { authBusy = true; authError = null; status = "Signing in…" }
         try {
-            val body = JSONObject()
-                .put("username", username)
-                .put("password", password)
-                .toString()
-                .toRequestBody(json)
-            val req = Request.Builder().url("$base/api/auth/login/token").post(body).build()
+            val body = if (hosted) {
+                // Control-plane app login: { email, password } → { token }.
+                JSONObject().put("email", username.trim()).put("password", password)
+            } else {
+                JSONObject().put("username", username.trim()).put("password", password)
+            }.toString().toRequestBody(json)
+            val loginUrl = if (hosted) "$HOSTED_LURKER_BASE/_cp/auth/app/login" else "$base/api/auth/login/token"
+            val req = Request.Builder().url(loginUrl).post(body).build()
             http.newCall(req).execute().use { res ->
+                val text = res.body?.string().orEmpty()
                 if (!res.isSuccessful) {
-                    post { status = "Sign-in failed (HTTP ${res.code})" }
+                    // 401/403 = bad creds; other codes = server/proxy problem.
+                    val msg = if (res.code == 401 || res.code == 403) {
+                        if (hosted) "Wrong email or password." else "Wrong username or password."
+                    } else "Sign-in failed (server said HTTP ${res.code})."
+                    post { authError = msg; authBusy = false; status = null }
                     return
                 }
-                token = JSONObject(res.body?.string().orEmpty()).getString("token")
+                val tok = runCatching { JSONObject(text).optString("token") }.getOrNull()
+                if (tok.isNullOrEmpty()) {
+                    // A non-JSON 200 (usually an HTML page) means we hit a web page,
+                    // not the Lurker API — almost always a wrong address.
+                    post {
+                        authError = "That address didn't return a Lurker login. Check the server URL."
+                        authBusy = false; status = null
+                    }
+                    return
+                }
+                token = tok
             }
-            prefs?.saveSession(base, username, token!!)
+            // Persist the EFFECTIVE base (app.lurker.chat for hosted) so silent
+            // resume reconnects to the right host, not the address the user typed.
+            prefs?.saveSession(base, username.trim(), token!!)
             fetchNetworkNames()
             post {
                 status = "Connecting…"
+                authBusy = false
                 loggedIn = true
             }
             openSocket(null)
             loadSettings() // chat rendering (font size) reads the registry
         } catch (e: Exception) {
-            post { status = "Sign-in failed: ${e.message}" }
+            // Network-level failure (unreachable host, TLS, timeout).
+            val why = e.message ?: "couldn't reach the server"
+            post { authError = "Couldn't connect: $why"; authBusy = false; status = null }
         }
+    }
+
+    /** Trim, strip a trailing slash, and default to https:// when the user typed a
+     *  bare host — the #1 cause of "no scheme" / HTML-instead-of-JSON sign-in errors. */
+    private fun normalizeServerUrl(raw: String): String {
+        var s = raw.trim().trimEnd('/')
+        if (s.isNotEmpty() && !s.startsWith("http://", true) && !s.startsWith("https://", true)) {
+            s = "https://$s"
+        }
+        return s
     }
 
     /** Tear down the session: close the socket, forget the token, reset state. */
@@ -630,6 +688,36 @@ open class LurkerClient {
                     handleWhoisResult(frame)
                     return
                 }
+                // A live /LIST refresh streams these targetless progress events
+                // (server writes rows to its cache as it goes). Re-poll so the
+                // browser fills in — and, critically, so switching to a network
+                // that had no cached list actually shows results. Without this the
+                // one immediate search after `list-channels` hits an empty cache
+                // and never refreshes — the "always picks my first network" bug.
+                when (frame.optString("type")) {
+                    "chanlist-start" -> {
+                        if (networkId == chanlistNetworkId) {
+                            chanlistInProgress = true
+                            chanlistTotalCount = 0
+                        }
+                        return
+                    }
+                    "chanlist-progress" -> {
+                        if (networkId == chanlistNetworkId) {
+                            chanlistInProgress = true
+                            chanlistTotalCount = frame.optInt("total", chanlistTotalCount)
+                            searchChannelList(chanlistQuery, chanlistSortBy, chanlistSortDir, 0)
+                        }
+                        return
+                    }
+                    "chanlist-end" -> {
+                        if (networkId == chanlistNetworkId) {
+                            chanlistInProgress = false
+                            searchChannelList(chanlistQuery, chanlistSortBy, chanlistSortDir, 0)
+                        }
+                        return
+                    }
+                }
                 val target = frame.optString("target")
                 if (target.isEmpty()) return
                 // Typing is ephemeral and must not create buffers — handle it
@@ -696,7 +784,7 @@ open class LurkerClient {
                 if (msg.id > 0) scheduleMarkRead(buffer.key)
                 if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground)) {
                     notificationSink?.invoke(
-                        NotifiableEvent(buffer.networkId, buffer.target, msg.nick, msg.text, frame.optBoolean("dm")),
+                        NotifiableEvent(buffer.networkId, buffer.target, msg.nick, msg.text, frame.optBoolean("dm"), msg.id),
                     )
                 }
             }
@@ -1149,7 +1237,16 @@ open class LurkerClient {
 
     /** Returns whether anything was actually added (false = every id was a dup),
      *  so the live path can avoid double-counting a re-delivered message. */
+    /** Remember (and persist) that a buffer carries E2E, so its sidebar lock
+     *  survives a restart / shows before history loads. */
+    protected fun markE2e(key: String) {
+        if (key in e2eSeen) return
+        e2eSeen.add(key)
+        prefs?.let { it.e2eBuffers = it.e2eBuffers + key }
+    }
+
     protected fun mergeInto(key: String, newMsgs: List<Msg>, replace: Boolean): Boolean {
+        if (newMsgs.any { it.e2e }) markE2e(key)
         if (replace) {
             messagesByBuffer[key] = newMsgs
             return true
@@ -1385,6 +1482,8 @@ open class LurkerClient {
                 self = e.optBoolean("self", false), time = e.optString("time").ifEmpty { null },
                 // Persisted flag: the message rode E2E (server already decrypted it).
                 e2e = e.optBoolean("e2e", false),
+                // Highlight rule hit (a mention / your nick) — gold background.
+                matched = e.optBoolean("matched", false),
             )
             // Ephemeral E2E status/handshake line: rendered as a tagged system
             // line (green info / red warn), never persisted. No crypto involved.
@@ -1424,7 +1523,9 @@ open class LurkerClient {
             "part" -> "← $nick left" + (reason?.let { " ($it)" } ?: "")
             "quit" -> "⇐ $nick quit" + (reason?.let { " ($it)" } ?: "")
             "kick" -> {
-                val who = e.optString("target").ifEmpty { e.optString("victim") }
+                // The victim rides "kicked" (server) — "target" is the CHANNEL, which
+                // is why kick lines used to read "X kicked #channel" (d3fc0n1).
+                val who = e.optString("kicked").ifEmpty { e.optString("victim") }
                 "$nick kicked ${who.ifEmpty { "someone" }}" + (reason?.let { " ($it)" } ?: "")
             }
             "nick" -> {
@@ -1979,6 +2080,9 @@ open class LurkerClient {
         val networkId = chanlistNetworkId
         if (networkId < 0) return
         chanlistKey = "$query|$sortBy|$sortDir"
+        chanlistQuery = query
+        chanlistSortBy = sortBy
+        chanlistSortDir = sortDir
         if (offset == 0) chanlistLoading = true
         ws?.send(
             JSONObject().put("type", "chanlist-search").put("networkId", networkId)
@@ -2004,7 +2108,7 @@ open class LurkerClient {
 
     // ---- Settings ---------------------------------------------------------
 
-    fun loadSettings() = io.execute {
+    open fun loadSettings() = io.execute {
         try {
             http.newCall(authed("/api/settings/bootstrap").build()).execute().use { res ->
                 if (!res.isSuccessful) {
@@ -2125,6 +2229,22 @@ open class LurkerClient {
         val COUNTABLE = setOf("message", "action", "notice")
         val SYSTEM_TYPES = setOf("join", "part", "quit", "nick", "kick", "mode", "topic", "invite")
     }
+}
+
+/** The managed, multi-tenant lurker.chat deployment. Its login is different from a
+ *  self-hosted server (email + control-plane mint, then proxied), so the client
+ *  branches on it — see [LurkerClient.login] and CLIENT_PROTOCOL §3.2. */
+const val HOSTED_LURKER_BASE = "https://app.lurker.chat"
+
+/** True when the typed address is the hosted lurker.chat app (bare host, with a
+ *  scheme, with a path, or with a port all normalize the same). Callers use this
+ *  to sign in with an email at the control plane instead of a username. */
+fun isHostedLurker(raw: String): Boolean {
+    val host = raw.trim()
+        .removePrefix("https://").removePrefix("http://")
+        .substringBefore('/').substringBefore(':')
+        .lowercase()
+    return host == "app.lurker.chat" || host == "lurker.chat"
 }
 
 /**
