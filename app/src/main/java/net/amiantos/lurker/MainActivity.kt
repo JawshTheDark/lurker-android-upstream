@@ -3315,10 +3315,12 @@ private val GROUP_LABELS = mapOf(
  * app or the account server-side. Server behaviors (chat filters, away, ctcp,
  * uploads, dcc, channel, push) still apply to mobile via the server, so they
  * stay. Everything under `look.*` styles the web renderer — mobile has its own
- * themes — except the one mobile font-size key it honors.
+ * themes. The app still READS look.font.size.mobile as its base font size, but
+ * the row is hidden: users adjust size via the device-local scale in Settings,
+ * so showing the synced web value too was a confusing second font control
+ * (freakyy85).
  */
 private fun settingHiddenOnMobile(key: String): Boolean = when {
-    key == "look.font.size.mobile" -> false      // the only look.* the mobile UI reads
     key.startsWith("look.") -> true              // fonts, palette, desktop layout, bars
     key.startsWith("input.") -> true             // web input-box prefs; Android uses the system IME
     key.contains(".sound.") -> true              // web notification audio; Android uses channels
