@@ -62,6 +62,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -177,6 +180,7 @@ import net.amiantos.lurker.ui.theme.formatTime
 import net.amiantos.lurker.ui.theme.formatTimeWithSeconds
 import net.amiantos.lurker.ui.theme.nickColor
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.navigationBars
@@ -808,6 +812,28 @@ private val CHANNEL_MODE_FLAGS = listOf(
     'g' to "Free invite",
 )
 
+/** Friendly labels for channel-mode letters across common ircds (solanum,
+ *  InspIRCd, UnrealIRCd, ngIRCd…). Used when the network advertised its ISUPPORT
+ *  and we render exactly its supported flag modes; unknown letters render as
+ *  "+x". Only paramless (type-D) modes actually surface as toggles. */
+private val CHANNEL_MODE_LABELS: Map<Char, String> = mapOf(
+    'm' to "Moderated", 't' to "Topic locked", 'i' to "Invite only",
+    'n' to "No external", 's' to "Secret", 'p' to "Private",
+    'c' to "No colors", 'C' to "No CTCP", 'r' to "Registered only",
+    'g' to "Free invite", 'z' to "SSL only", 'S' to "SSL only",
+    'R' to "Registered only", 'M' to "Reg. moderated", 'T' to "No notices",
+    'N' to "No nick changes", 'D' to "Delayed join", 'u' to "Hide unregistered",
+    'O' to "Oper only", 'A' to "Admin only", 'Q' to "No kicks",
+    'K' to "No knock", 'P' to "Permanent", 'G' to "Word filter",
+    'F' to "Free forward", 'L' to "Large ban list",
+)
+
+/** Friendly names for the per-user rank (PREFIX) modes, used by the member
+ *  action sheet's grant/revoke rows. */
+private val RANK_LABELS: Map<Char, String> = mapOf(
+    'q' to "owner", 'a' to "admin", 'o' to "op", 'h' to "halfop", 'v' to "voice",
+)
+
 /**
  * Glassmorphic channel control panel that slides down from the channel-name pill.
  * Shows the topic, toggleable flag modes (server enforces op-only), and the
@@ -830,6 +856,9 @@ private fun ChannelControlPanel(
     val topDp = with(density) { topInsetPx.toDp() }
     val topic = client.topics[buffer.key]
     val modes = client.channelModes[buffer.key].orEmpty()
+    // ISUPPORT for this network (patched server / Direct mode). Null on a vanilla
+    // Lurker server → the mode chips fall back to a curated list.
+    val si = buffer.networkId?.let { client.serverInfo[it] }
     val e2e = buffer.key in client.e2eSeen ||
         (client.messagesByBuffer[buffer.key]?.asReversed()?.take(150)?.any { it.e2e } == true)
     val memberCount = client.members[buffer.key]?.size ?: 0
@@ -864,20 +893,20 @@ private fun ChannelControlPanel(
                     .clip(RoundedCornerShape(20.dp))
                     .hazeEffect(hazeState, style = glassStyle())
                     .background(SurfaceDark, RoundedCornerShape(20.dp))
-                    .border(0.5.dp, GlassBorder, RoundedCornerShape(20.dp))
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                    .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 // Header.
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (e2e) {
-                        LockGlyph(color = OnlineGreen, size = 15.dp)
-                        Spacer(Modifier.width(6.dp))
+                        LockGlyph(color = OnlineGreen, size = 14.dp)
+                        Spacer(Modifier.width(5.dp))
                     }
-                    Text(buffer.displayName, color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    Text("$memberCount", color = TextSecondary, fontSize = 13.sp)
+                    Text(buffer.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("$memberCount", color = TextSecondary, fontSize = 12.sp)
                     Spacer(Modifier.width(4.dp))
-                    MembersGlyph(color = TextSecondary, size = 15.dp)
+                    MembersGlyph(color = TextSecondary, size = 14.dp)
                 }
 
                 // Topic — tap Edit to change it (raw TOPIC; op-only when +t).
@@ -904,7 +933,8 @@ private fun ChannelControlPanel(
                             value = topicDraft,
                             onValueChange = { topicDraft = it },
                             placeholder = { Text("Channel topic", fontSize = 13.sp) },
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 140.dp),
+                            textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 104.dp),
                         )
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -926,17 +956,34 @@ private fun ChannelControlPanel(
                         Text(
                             mircAnnotated(topic, AccentBlue, onOpenLink),
                             color = TextPrimary,
-                            fontSize = 13.sp,
-                            modifier = Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()),
+                            fontSize = 12.5.sp,
+                            lineHeight = 16.sp,
+                            modifier = Modifier.heightIn(max = 88.dp).verticalScroll(rememberScrollState()),
                         )
                     }
                 }
 
-                // Flag-mode chips (tap toggles; the server enforces op-only).
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("CHANNEL MODES", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CHANNEL_MODE_FLAGS.forEach { (flag, label) ->
+                // Flag-mode chips (tap toggles; the server enforces op-only). When
+                // the server advertised its ISUPPORT (si != null) we show exactly
+                // the paramless (type-D) modes THIS ircd supports; otherwise we fall
+                // back to a curated cross-ircd list so a vanilla server still works.
+                val flagModes: List<Pair<Char, String>> =
+                    if (si != null && si.flagModes.isNotEmpty()) {
+                        si.flagModes.sorted().map { it to (CHANNEL_MODE_LABELS[it] ?: "+$it") }
+                    } else {
+                        CHANNEL_MODE_FLAGS
+                    }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("CHANNEL MODES", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        // Server software, when the network told us (read directly
+                        // off ISUPPORT/004) — otherwise nothing.
+                        if (!si?.software.isNullOrBlank()) {
+                            Text("  ·  ${si!!.software}", color = TextSecondary, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        flagModes.forEach { (flag, label) ->
                             val on = flag in modes
                             ModeChip(label, on) { client.setChannelMode(buffer, flag, !on) }
                         }
@@ -955,8 +1002,12 @@ private fun ChannelControlPanel(
                     client.setNotifyMuted(buffer, it)
                 }
 
-                TextButton(onClick = onMembers, modifier = Modifier.align(Alignment.End)) {
-                    Text("View members", color = AccentBlue, fontSize = 14.sp)
+                TextButton(
+                    onClick = onMembers,
+                    modifier = Modifier.align(Alignment.End),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text("View members", color = AccentBlue, fontSize = 13.sp)
                 }
             }
         }
@@ -968,21 +1019,29 @@ private fun ModeChip(label: String, on: Boolean, onClick: (() -> Unit)?) {
     Text(
         label,
         color = if (on) Color.White else TextSecondary,
-        fontSize = 12.sp,
+        fontSize = 11.5.sp,
         fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (on) AccentBlue else PillGray, RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (on) AccentBlue else PillGray, RoundedCornerShape(8.dp))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 11.dp, vertical = 6.dp),
+            .padding(horizontal = 9.dp, vertical = 4.dp),
     )
 }
 
 @Composable
 private fun PanelToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChange)
+        Text(label, color = TextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        // Drop the 48dp min touch target so the row is only as tall as the
+        // (scaled-down) switch — keeps the panel compact.
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+            Switch(
+                checked = checked,
+                onCheckedChange = onChange,
+                modifier = Modifier.scale(0.8f),
+            )
+        }
     }
 }
 
@@ -2609,13 +2668,17 @@ private fun MemberActions(
         }
         if (canModerate) {
             HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 6.dp))
-            val isOp = "o" in member.modes
-            val hasVoice = "v" in member.modes
-            SheetAction(if (isOp) "Take op" else "Give op") {
-                raw("MODE $chan ${if (isOp) "-o" else "+o"} $nick")
-            }
-            SheetAction(if (hasVoice) "Remove voice" else "Give voice") {
-                raw("MODE $chan ${if (hasVoice) "-v" else "+v"} $nick")
+            // Rank grant/revoke driven by the network's PREFIX ladder — so a server
+            // with halfop/admin/owner shows those too. Falls back to op+voice on a
+            // vanilla server that didn't advertise ISUPPORT.
+            val ranks: List<Char> = client.serverInfo[networkId]?.prefixes?.map { it.first }
+                ?: listOf('o', 'v')
+            ranks.forEach { m ->
+                val has = m.toString() in member.modes
+                val label = RANK_LABELS[m] ?: "+$m"
+                SheetAction(if (has) "Take $label" else "Give $label") {
+                    raw("MODE $chan ${if (has) "-" else "+"}$m $nick")
+                }
             }
             SheetAction("Kick", danger = true) { raw("KICK $chan $nick") }
             SheetAction("Ban", danger = true) { raw("MODE $chan +b ${member.banMask}") }

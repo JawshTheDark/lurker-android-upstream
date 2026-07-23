@@ -11,6 +11,74 @@ data class Network(
     val connected: Boolean,
 )
 
+/**
+ * The mode vocabulary a network's IRC server advertises via ISUPPORT (plus the
+ * server software string from RPL_MYINFO), so the UI can offer exactly the
+ * channel/user modes THIS ircd supports instead of a hardcoded guess.
+ *
+ * Absent (no entry in the map) for a vanilla Lurker server that doesn't send the
+ * `server-info` frame yet — callers fall back to a curated default list, so the
+ * app still works fully against an unpatched server.
+ */
+data class ServerInfo(
+    /** Raw ircd/version string (e.g. "solanum-1.0-dev"); may be empty. */
+    val software: String,
+    /** ISUPPORT NETWORK token (e.g. "Libera.Chat"). */
+    val network: String,
+    /** ISUPPORT CHANTYPES (e.g. "#" or "#&"). */
+    val chanTypes: String,
+    /** CHANMODES group A — list modes (bans/exceptions); always take a param. */
+    val typeA: Set<Char>,
+    /** CHANMODES group B — always take a param when set/unset (e.g. key). */
+    val typeB: Set<Char>,
+    /** CHANMODES group C — take a param only when set (e.g. limit). */
+    val typeC: Set<Char>,
+    /** CHANMODES group D — paramless flag modes (moderated, invite-only, …). */
+    val typeD: Set<Char>,
+    /** PREFIX ladder high→low as (mode, symbol): e.g. o→@, v→+. */
+    val prefixes: List<Pair<Char, Char>>,
+) {
+    /** Paramless flag modes — the toggle chips in the channel control panel. */
+    val flagModes: Set<Char> get() = typeD
+
+    /** True if [mode] takes a parameter (A always, B always, C when setting). */
+    fun takesParam(mode: Char): Boolean = mode in typeA || mode in typeB || mode in typeC
+
+    companion object {
+        /** Build from the raw ISUPPORT strings the server/KICL hand us. */
+        fun parse(
+            software: String,
+            network: String,
+            chanModes: String,
+            prefix: String,
+            chanTypes: String,
+        ): ServerInfo {
+            val g = chanModes.split(',')
+            fun grp(i: Int): Set<Char> = g.getOrNull(i)?.toSet() ?: emptySet()
+            // PREFIX "(qaohv)~&@%+" -> [(q,~),(a,&),(o,@),(h,%),(v,+)].
+            val open = prefix.indexOf('(')
+            val close = prefix.indexOf(')')
+            val prefixes = if (open == 0 && close in 2 until prefix.length) {
+                val modes = prefix.substring(1, close)
+                val syms = prefix.substring(close + 1)
+                modes.zip(syms) { m, s -> m to s }
+            } else {
+                emptyList()
+            }
+            return ServerInfo(
+                software = software,
+                network = network,
+                chanTypes = chanTypes.ifEmpty { "#" },
+                typeA = grp(0),
+                typeB = grp(1),
+                typeC = grp(2),
+                typeD = grp(3),
+                prefixes = prefixes,
+            )
+        }
+    }
+}
+
 /** A conversation: a channel, a DM, or the app-scoped system buffer. */
 data class Buffer(
     /** null for the system buffer, which is read-only. */

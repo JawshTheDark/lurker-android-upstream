@@ -197,6 +197,25 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
             connected = networks.values.any { it.connected }
             lastSurfacedError.remove(networkId) // fresh success — arm errors again
             status = "Connected to ${netName()}"
+            // Network-aware modes: KICL has parsed this connection's ISUPPORT by
+            // now, so build the same ServerInfo the Lurker backend gets from its
+            // `server-info` frame. runCatching so a KICL surprise can't break the
+            // connect flow.
+            runCatching {
+                val si = client.serverInfo
+                fun sup(k: String) = si.getISupportParameter(k).flatMap { it.value }.orElse("")
+                val chanModes = sup("CHANMODES")
+                val prefix = sup("PREFIX")
+                if (chanModes.isNotEmpty() || prefix.isNotEmpty()) {
+                    serverInfo[networkId] = ServerInfo.parse(
+                        software = software,
+                        network = sup("NETWORK").ifEmpty { netName() },
+                        chanModes = chanModes,
+                        prefix = prefix,
+                        chanTypes = sup("CHANTYPES"),
+                    )
+                }
+            }
             if (isSojuControl) {
                 // Discover the bouncer's upstream networks; each becomes its own row.
                 io.execute { runCatching { client.sendRawLine("BOUNCER LISTNETWORKS") } }
@@ -241,8 +260,17 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
         // Registration rejections: soju/ZNC send `464 :<reason>` (bad password/token)
         // — plus the neighbouring auth numerics — then close. Show the reason.
+        // RPL_MYINFO (004): "<nick> <servername> <version> <umodes> <chanmodes>".
+        // Grab the server software/version string so the mode UI can show it.
+        private var software = ""
+
         @Handler
         fun onNumeric(e: ClientReceiveNumericEvent) {
+            if (e.numeric == 4) {
+                (e.parameters.getOrNull(2)?.takeIf { it.isNotBlank() }
+                    ?: e.parameters.getOrNull(1))?.let { software = it }
+                return
+            }
             if (e.numeric !in AUTH_ERROR_NUMERICS) return
             val reason = e.parameters.lastOrNull()?.takeIf { it.isNotBlank() }
             post { surfaceError(reason ?: "Authentication failed (${e.numeric})") }

@@ -58,6 +58,13 @@ open class LurkerClient {
         protected set
 
     val networks = mutableStateMapOf<Int, Network>()
+
+    /** Per-network ISUPPORT mode vocabulary + server software, when the server
+     *  advertises it (via the `server-info` frame / snapshot field). Absent =
+     *  a vanilla Lurker server that doesn't send it yet — the mode UI then falls
+     *  back to a curated default, so the app still works against an unpatched
+     *  server. */
+    val serverInfo = mutableStateMapOf<Int, ServerInfo>()
     val buffers = mutableStateListOf<Buffer>()
 
     /** bufferKey -> messages, in id order. */
@@ -760,6 +767,21 @@ open class LurkerClient {
                     }
                     return
                 }
+                // ISUPPORT mode vocabulary + server software (patched server only;
+                // vanilla never sends this, leaving serverInfo[net] null → curated
+                // fallback in the UI). Ephemeral, no chat row.
+                if (frame.optString("type") == "server-info") {
+                    if (networkId != null) {
+                        serverInfo[networkId] = ServerInfo.parse(
+                            software = frame.optString("software"),
+                            network = frame.optString("network"),
+                            chanModes = frame.optString("chanModes"),
+                            prefix = frame.optString("prefix"),
+                            chanTypes = frame.optString("chanTypes"),
+                        )
+                    }
+                    return
+                }
                 if (frame.optString("type") == "topic" && networkId != null) {
                     // A live change: keep the topic bar current (still falls through
                     // to render the "X set the topic" system line below).
@@ -1070,6 +1092,17 @@ open class LurkerClient {
                 nick = n.optString("nick").ifEmpty { null },
                 connected = n.optBoolean("connected", n.optString("state") == "connected"),
             )
+            // ISUPPORT vocabulary carried in the snapshot (patched server); null
+            // on a vanilla server so the UI falls back to a curated mode list.
+            n.optJSONObject("serverInfo")?.let { si ->
+                serverInfo[id] = ServerInfo.parse(
+                    software = si.optString("software"),
+                    network = si.optString("network"),
+                    chanModes = si.optString("chanModes"),
+                    prefix = si.optString("prefix"),
+                    chanTypes = si.optString("chanTypes"),
+                )
+            }
             // Per-network pinned buffers, in the user's chosen order.
             n.optJSONArray("pinned")?.let { p ->
                 pins[id] = (0 until p.length()).map { p.optString(it) }
@@ -1093,8 +1126,15 @@ open class LurkerClient {
                 for (c in 0 until chans.length()) {
                     val ch = chans.optJSONObject(c) ?: continue
                     val chName = ch.optString("name")
-                    val roster = ch.optJSONArray("members") ?: continue
-                    if (chName.isNotEmpty()) members["$id::$chName"] = parseMembers(roster)
+                    if (chName.isEmpty()) continue
+                    val key = "$id::$chName"
+                    ch.optJSONArray("members")?.let { members[key] = parseMembers(it) }
+                    // The snapshot already carries each channel's current topic and
+                    // flag-mode string — capture them so the control panel shows the
+                    // active modes (and topic) immediately, instead of waiting for
+                    // the on-open MODE/TOPIC self-heal to round-trip.
+                    ch.optString("topic").takeIf { it.isNotEmpty() }?.let { topics[key] = it }
+                    ch.optString("modes").takeIf { it.isNotEmpty() }?.let { channelModes[key] = it }
                 }
             }
         }
