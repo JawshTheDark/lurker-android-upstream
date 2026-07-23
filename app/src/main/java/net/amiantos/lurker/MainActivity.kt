@@ -791,13 +791,21 @@ private fun TabletHome(
     }
 }
 
-/** Common toggleable channel flag modes, shown as chips in the control panel. */
+/** Common toggleable (paramless) channel flag modes, shown as chips in the
+ *  control panel. Exact support varies by IRCd — toggling one the server
+ *  doesn't know just draws a harmless error notice in the channel/server
+ *  buffer; the chip reflects whatever the live +modes string actually reports. */
 private val CHANNEL_MODE_FLAGS = listOf(
     'm' to "Moderated",
     't' to "Topic locked",
     'i' to "Invite only",
     'n' to "No external",
     's' to "Secret",
+    'p' to "Private",
+    'c' to "No colors",
+    'C' to "No CTCP",
+    'r' to "Registered only",
+    'g' to "Free invite",
 )
 
 /**
@@ -825,6 +833,10 @@ private fun ChannelControlPanel(
     val e2e = buffer.key in client.e2eSeen ||
         (client.messagesByBuffer[buffer.key]?.asReversed()?.take(150)?.any { it.e2e } == true)
     val memberCount = client.members[buffer.key]?.size ?: 0
+    var editingTopic by remember(buffer.key) { mutableStateOf(false) }
+    var topicDraft by remember(buffer.key) { mutableStateOf("") }
+    // Leaving the panel cancels an in-progress topic edit so it doesn't linger.
+    LaunchedEffect(visible) { if (!visible) editingTopic = false }
 
     Box(Modifier.fillMaxSize()) {
         // Scrim — tap outside to dismiss.
@@ -868,10 +880,47 @@ private fun ChannelControlPanel(
                     MembersGlyph(color = TextSecondary, size = 15.dp)
                 }
 
-                // Topic.
+                // Topic — tap Edit to change it (raw TOPIC; op-only when +t).
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("TOPIC", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    if (topic.isNullOrBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("TOPIC", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        if (buffer.isChannel && !editingTopic) {
+                            Text(
+                                "Edit",
+                                color = AccentBlue,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        topicDraft = topic.orEmpty()
+                                        editingTopic = true
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    if (editingTopic) {
+                        OutlinedTextField(
+                            value = topicDraft,
+                            onValueChange = { topicDraft = it },
+                            placeholder = { Text("Channel topic", fontSize = 13.sp) },
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 140.dp),
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.align(Alignment.End),
+                        ) {
+                            TextButton(onClick = { editingTopic = false }) {
+                                Text("Cancel", color = TextSecondary, fontSize = 13.sp)
+                            }
+                            TextButton(onClick = {
+                                client.setTopic(buffer, topicDraft.trim())
+                                editingTopic = false
+                            }) {
+                                Text("Save", color = AccentBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    } else if (topic.isNullOrBlank()) {
                         Text("No topic set.", color = TextSecondary, fontSize = 13.sp)
                     } else {
                         Text(

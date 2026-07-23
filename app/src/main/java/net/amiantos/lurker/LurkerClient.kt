@@ -1661,6 +1661,20 @@ open class LurkerClient {
         )
     }
 
+    /** Set (or clear) the channel topic via a raw TOPIC command. Op-only when the
+     *  channel is +t; a non-op's attempt just bounces with a notice. An empty
+     *  string clears the topic. */
+    fun setTopic(buffer: Buffer, topic: String) {
+        val networkId = buffer.networkId ?: return
+        ws?.send(
+            JSONObject()
+                .put("type", "raw")
+                .put("networkId", networkId)
+                .put("line", "TOPIC ${buffer.target} :$topic")
+                .toString(),
+        )
+    }
+
     /** Ensure a DM/channel buffer exists, hydrate it, and return it for focusing. */
     fun focusTarget(networkId: Int, target: String): Buffer {
         val buffer = ensureBuffer(networkId, target)
