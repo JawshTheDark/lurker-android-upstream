@@ -77,6 +77,12 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("biometricLock", false)
         set(value) = sp.edit { putBoolean("biometricLock", value) }
 
+    /** Require a biometric unlock to open an encrypted (E2E) channel; re-locks when
+     *  the app is backgrounded (amiantos's idea). Independent of the app-open lock. */
+    var e2eBiometricLock: Boolean
+        get() = sp.getBoolean("e2eBiometricLock", false)
+        set(value) = sp.edit { putBoolean("e2eBiometricLock", value) }
+
     /** Hold the connection open in the background via a foreground service so
      *  highlight/DM notifications keep arriving. Opt-in — off = no persistent
      *  notification, rely on ?since= resume on return (default off). */

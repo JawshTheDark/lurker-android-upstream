@@ -87,6 +87,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.StartOffset
 import androidx.compose.animation.core.animateFloat
@@ -166,6 +174,7 @@ import net.amiantos.lurker.ui.theme.SurfaceDark
 import net.amiantos.lurker.ui.theme.SurfaceRaised
 import net.amiantos.lurker.ui.theme.TextSecondary
 import net.amiantos.lurker.ui.theme.formatTime
+import net.amiantos.lurker.ui.theme.formatTimeWithSeconds
 import net.amiantos.lurker.ui.theme.nickColor
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
@@ -240,6 +249,13 @@ class MainActivity : FragmentActivity() {
     /** True while the biometric lock is covering the UI (see [promptUnlock]). */
     private var locked by mutableStateOf(false)
 
+    /** Set once the user has biometrically unlocked E2E channels this foreground
+     *  session (prefs.e2eBiometricLock). Reset on background so switching away
+     *  re-locks them (amiantos). Only relevant when the toggle is on. */
+    private var e2eUnlocked by mutableStateOf(false)
+    /** True while an E2E-unlock prompt is already showing, so we don't stack them. */
+    private var e2ePrompting = false
+
     /** A file arriving via the system share sheet, waiting for a buffer pick. */
     private var sharedUri by mutableStateOf<Uri?>(null)
 
@@ -299,6 +315,18 @@ class MainActivity : FragmentActivity() {
 
                 if (locked) {
                     LockScreen(onUnlock = { promptUnlock() })
+                    return@LurkerTheme
+                }
+
+                // Per-channel E2E biometric gate (prefs.e2eBiometricLock): cover a
+                // known-secure channel with a lock until the user authenticates.
+                // Re-locks on background (onStop). Single-pane nav only for now.
+                val e2eChat = (screen as? Screen.Chat)?.buffer
+                if (prefs.e2eBiometricLock && !e2eUnlocked &&
+                    e2eChat != null && e2eChat.key in client.e2eSeen
+                ) {
+                    LaunchedEffect(e2eChat.key) { promptE2eUnlock() }
+                    LockScreen(onUnlock = { promptE2eUnlock() }, e2e = true)
                     return@LurkerTheme
                 }
 
@@ -552,6 +580,55 @@ class MainActivity : FragmentActivity() {
         super.onStop()
         client.onBackground()
         (application as LurkerApp).backgroundedAt = SystemClock.elapsedRealtime()
+        // Switching away re-locks E2E channels (amiantos) — next open re-prompts.
+        e2eUnlocked = false
+    }
+
+    /** Biometric gate for opening an E2E channel (prefs.e2eBiometricLock). Same
+     *  fall-open behaviour as the app-open lock: if the device can't authenticate,
+     *  don't strand the user. On success, E2E channels open until next background. */
+    private fun promptE2eUnlock() {
+        if (e2ePrompting) return
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        if (BiometricManager.from(this).canAuthenticate(authenticators) !=
+            BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            e2eUnlocked = true
+            return
+        }
+        e2ePrompting = true
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    e2ePrompting = false
+                    e2eUnlocked = true
+                }
+                override fun onAuthenticationError(code: Int, err: CharSequence) {
+                    e2ePrompting = false
+                    when (code) {
+                        BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL,
+                        BiometricPrompt.ERROR_HW_NOT_PRESENT,
+                        BiometricPrompt.ERROR_HW_UNAVAILABLE,
+                        BiometricPrompt.ERROR_NO_BIOMETRICS,
+                        -> e2eUnlocked = true
+                    }
+                }
+            },
+        )
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock encrypted channel")
+            .setSubtitle("Confirm it's you to view secure chats")
+            .setAllowedAuthenticators(authenticators)
+            .build()
+        try {
+            prompt.authenticate(info)
+        } catch (_: Exception) {
+            e2ePrompting = false
+            e2eUnlocked = true
+        }
     }
 
     /** Show the system biometric / device-credential prompt; unlock on success. */
@@ -714,14 +791,164 @@ private fun TabletHome(
     }
 }
 
-/** Full-bleed cover shown while the biometric lock is engaged. */
+/** Common toggleable channel flag modes, shown as chips in the control panel. */
+private val CHANNEL_MODE_FLAGS = listOf(
+    'm' to "Moderated",
+    't' to "Topic locked",
+    'i' to "Invite only",
+    'n' to "No external",
+    's' to "Secret",
+)
+
+/**
+ * Glassmorphic channel control panel that slides down from the channel-name pill.
+ * Shows the topic, toggleable flag modes (server enforces op-only), and the
+ * per-channel notification controls. Replaces the always-on topic bar (d3fc0n1
+ * didn't want it always visible; amiantos's iOS app puts this behind the pill).
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LockScreen(onUnlock: () -> Unit) {
+private fun ChannelControlPanel(
+    client: LurkerClient,
+    buffer: Buffer,
+    hazeState: HazeState,
+    topInsetPx: Int,
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    onOpenLink: (String) -> Unit,
+    onMembers: () -> Unit,
+) {
+    val density = LocalDensity.current
+    val topDp = with(density) { topInsetPx.toDp() }
+    val topic = client.topics[buffer.key]
+    val modes = client.channelModes[buffer.key].orEmpty()
+    val e2e = buffer.key in client.e2eSeen ||
+        (client.messagesByBuffer[buffer.key]?.asReversed()?.take(150)?.any { it.e2e } == true)
+    val memberCount = client.members[buffer.key]?.size ?: 0
+
+    Box(Modifier.fillMaxSize()) {
+        // Scrim — tap outside to dismiss.
+        AnimatedVisibility(visible, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { onDismiss() },
+            )
+        }
+        AnimatedVisibility(
+            visible = visible,
+            enter = slideInVertically { -it } + fadeIn(),
+            exit = slideOutVertically { -it } + fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Column(
+                Modifier
+                    .padding(top = topDp + 6.dp, start = 10.dp, end = 10.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .hazeEffect(hazeState, style = glassStyle())
+                    .background(SurfaceDark, RoundedCornerShape(20.dp))
+                    .border(0.5.dp, GlassBorder, RoundedCornerShape(20.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                // Header.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (e2e) {
+                        LockGlyph(color = OnlineGreen, size = 15.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(buffer.displayName, color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("$memberCount", color = TextSecondary, fontSize = 13.sp)
+                    Spacer(Modifier.width(4.dp))
+                    MembersGlyph(color = TextSecondary, size = 15.dp)
+                }
+
+                // Topic.
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("TOPIC", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    if (topic.isNullOrBlank()) {
+                        Text("No topic set.", color = TextSecondary, fontSize = 13.sp)
+                    } else {
+                        Text(
+                            mircAnnotated(topic, AccentBlue, onOpenLink),
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()),
+                        )
+                    }
+                }
+
+                // Flag-mode chips (tap toggles; the server enforces op-only).
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("CHANNEL MODES", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CHANNEL_MODE_FLAGS.forEach { (flag, label) ->
+                            val on = flag in modes
+                            ModeChip(label, on) { client.setChannelMode(buffer, flag, !on) }
+                        }
+                        if ('k' in modes) ModeChip("Key set", true, onClick = null)
+                        if ('l' in modes) ModeChip("Limited", true, onClick = null)
+                    }
+                }
+
+                HorizontalDivider(color = GlassBorder)
+
+                // Notifications.
+                PanelToggleRow("Notify on every message", client.isNotifyAlways(buffer)) {
+                    client.setNotifyAlways(buffer, it)
+                }
+                PanelToggleRow("Mute notifications", client.isNotifyMuted(buffer)) {
+                    client.setNotifyMuted(buffer, it)
+                }
+
+                TextButton(onClick = onMembers, modifier = Modifier.align(Alignment.End)) {
+                    Text("View members", color = AccentBlue, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModeChip(label: String, on: Boolean, onClick: (() -> Unit)?) {
+    Text(
+        label,
+        color = if (on) Color.White else TextSecondary,
+        fontSize = 12.sp,
+        fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (on) AccentBlue else PillGray, RoundedCornerShape(10.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 11.dp, vertical = 6.dp),
+    )
+}
+
+@Composable
+private fun PanelToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** Full-bleed cover shown while the biometric lock is engaged. [e2e] switches the
+ *  copy/colour to the per-channel encrypted-channel gate. */
+@Composable
+private fun LockScreen(onUnlock: () -> Unit, e2e: Boolean = false) {
     Box(Modifier.fillMaxSize().background(CanvasBlack), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LockGlyph(color = TextSecondary, size = 44.dp)
+            LockGlyph(color = if (e2e) OnlineGreen else TextSecondary, size = 44.dp)
             Spacer(Modifier.height(16.dp))
-            Text("Lurker is locked", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (e2e) "Encrypted channel locked" else "Lurker is locked",
+                color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+            )
             Spacer(Modifier.height(20.dp))
             TextButton(onClick = onUnlock) {
                 Text("Unlock", color = AccentBlue, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -1406,7 +1633,7 @@ private fun ChatScreen(
     }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
-    var showTopic by remember { mutableStateOf(false) }
+    var showChannelPanel by remember { mutableStateOf(false) }
     // Message whose long-press action sheet is open, if any.
     var actionMsg by remember(buffer.key) { mutableStateOf<Msg?>(null) }
     val messages = client.messagesByBuffer[buffer.key] ?: emptyList()
@@ -1421,6 +1648,13 @@ private fun ChatScreen(
     val divider = client.dividerAfter[buffer.key]
     val rows = remember(messages, divider) { buildChatRows(messages, divider) }
     val listState = rememberLazyListState()
+    // iMessage-style swipe-to-reveal timestamps (amiantos): timestamps are hidden;
+    // a left-drag on any bubble pulls ALL bubbles over via this one shared offset,
+    // sliding each message's time in from the right. Springs back on release.
+    val revealScope = rememberCoroutineScope()
+    val revealAnim = remember { androidx.compose.animation.core.Animatable(0f) }
+    // Wide enough for the full "11:47:32 PM" timestamp at the larger reveal font.
+    val revealMaxPx = with(LocalDensity.current) { 108.dp.toPx() }
 
     // Upload → provider URL → splice into the draft (attach button + share sheet).
     val context = LocalContext.current
@@ -1519,30 +1753,6 @@ private fun ChatScreen(
         if (typers.isNotEmpty() && rows.isNotEmpty() && !listState.canScrollForward) {
             listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
-    }
-
-    if (showTopic) {
-        val topic = client.topics[buffer.key].orEmpty()
-        AlertDialog(
-            onDismissRequest = { showTopic = false },
-            containerColor = SurfaceRaised,
-            title = { Text("Topic — ${buffer.displayName}", color = TextPrimary, fontSize = 16.sp) },
-            text = {
-                if (topic.isBlank()) {
-                    Text("No topic set.", color = TextSecondary)
-                } else {
-                    Text(
-                        mircAnnotated(topic, AccentBlue, openLink),
-                        color = TextPrimary,
-                        fontSize = 14.sp,
-                        modifier = Modifier.verticalScroll(rememberScrollState()),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showTopic = false }) { Text("Close", color = AccentBlue) }
-            },
-        )
     }
 
     joinPrompt?.let { chan ->
@@ -1724,6 +1934,14 @@ private fun ChatScreen(
                         onAction = { actionMsg = it },
                         onSwipeReply = { replyTo(it) },
                         flash = row.msg.id == flashMsgId,
+                        revealProvider = { revealAnim.value },
+                        revealMaxPx = revealMaxPx,
+                        onReveal = { d ->
+                            revealScope.launch {
+                                revealAnim.snapTo((revealAnim.value + d).coerceIn(-revealMaxPx, 0f))
+                            }
+                        },
+                        onRevealEnd = { revealScope.launch { revealAnim.animateTo(0f) } },
                     )
                     is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
@@ -1765,7 +1983,16 @@ private fun ChatScreen(
                                 .background(SurfaceDark, RoundedCornerShape(18.dp))
                                 .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
                                 .combinedClickable(
-                                    onClick = { if (!embedded) onBack() },
+                                    // Tap the pill → channel control panel (topic,
+                                    // modes, notifications). DMs/system buffers have
+                                    // no panel, so they fall back to back-nav.
+                                    onClick = {
+                                        if (buffer.isChannel) {
+                                            showChannelPanel = true
+                                        } else if (!embedded) {
+                                            onBack()
+                                        }
+                                    },
                                     onLongClick = {
                                         if (!buffer.isSystem && !buffer.isServerBuffer) titleMenu = true
                                     },
@@ -1822,27 +2049,21 @@ private fun ChatScreen(
                     }
                 },
             )
-            // Channel topic bar — one tappable line under the app bar; tap to
-            // read the full topic (works on phone, not just the tablet layout).
-            val topic = client.topics[buffer.key]
-            if (buffer.isChannel && !topic.isNullOrBlank()) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { showTopic = true }
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        mircAnnotated(topic, AccentBlue),
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
+        }
+
+        // Channel control panel — tap the channel name pill to slide it out.
+        // Topic, flag-mode toggles, and notification controls, on frosted glass.
+        if (buffer.isChannel) {
+            ChannelControlPanel(
+                client = client,
+                buffer = buffer,
+                hazeState = hazeState,
+                topInsetPx = topBarHeightPx,
+                visible = showChannelPanel,
+                onDismiss = { showChannelPanel = false },
+                onOpenLink = openLink,
+                onMembers = { showChannelPanel = false; showMembers = true },
+            )
         }
 
         // Frosted composer, hugging the keyboard.
@@ -2474,6 +2695,14 @@ private fun MessageBubble(
     onAction: ((Msg) -> Unit)? = null,
     onSwipeReply: ((Msg) -> Unit)? = null,
     flash: Boolean = false,
+    // iMessage-style timestamp reveal. revealProvider returns the shared offset
+    // (0 = hidden, negative = pulled left); onReveal feeds a left-drag delta into
+    // it; onRevealEnd springs it back. Read as a lambda so the drag animates in the
+    // layout phase without recomposing every bubble each frame.
+    revealProvider: () -> Float = { 0f },
+    revealMaxPx: Float = 0f,
+    onReveal: (Float) -> Unit = {},
+    onRevealEnd: () -> Unit = {},
 ) {
     val self = msg.self
     // Swipe a bubble sideways to reply (reuses the long-press reply seam). The
@@ -2505,52 +2734,87 @@ private fun MessageBubble(
         bottomStart = if (!self && !last) tight else big,
         bottomEnd = if (self && !last) tight else big,
     )
-    Column(
-        horizontalAlignment = if (self) Alignment.End else Alignment.Start,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(
-                if (onSwipeReply != null) {
-                    Modifier
-                        .offset { IntOffset(shownX.roundToInt(), 0) }
-                        .draggable(
-                            orientation = Orientation.Horizontal,
-                            state = rememberDraggableState { delta ->
-                                val next = (dragPx + delta).coerceIn(0f, maxDragPx)
-                                if (next >= triggerPx && !firedThisDrag) {
-                                    firedThisDrag = true
-                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                }
-                                dragPx = next
-                            },
-                            onDragStopped = {
-                                val reached = dragPx >= triggerPx
-                                settleAnim.snapTo(dragPx)
-                                settling = true
-                                if (reached) onSwipeReply(msg)
-                                settleAnim.animateTo(0f)
-                                dragPx = 0f
-                                settling = false
-                                firedThisDrag = false
-                            },
-                        )
-                } else Modifier,
-            )
-            .padding(
-                start = if (self) 64.dp else 12.dp,
-                end = if (self) 12.dp else 64.dp,
-                top = if (first) groupTop else lineTop,
-                bottom = 1.dp,
-            ),
-    ) {
-        if (first && !self) {
+    // A single horizontal drag drives two behaviours, latched by initial direction:
+    // right = swipe-to-reply (this bubble, local), left = reveal timestamps (all
+    // bubbles, via the shared reveal offset). 0 undecided, 1 reply, -1 reveal.
+    var dragMode by remember(msg.id) { mutableStateOf(0) }
+    Box(Modifier.fillMaxWidth()) {
+        // Per-message timestamp, parked just off the right edge and slid + faded in
+        // as the bubbles pull left (iMessage). Shown for every row on reveal.
+        if (revealMaxPx > 0f) {
             Text(
-                msg.nick,
-                color = nickColor(msg.nick),
-                fontSize = (baseSize - 3).sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
+                formatTimeWithSeconds(msg.time) ?: "",
+                color = if (msg.e2e) OnlineGreen else TextSecondary,
+                fontSize = (baseSize - 2).sp,
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 10.dp)
+                    .offset { IntOffset((revealMaxPx + revealProvider()).roundToInt(), 0) }
+                    .graphicsLayer { alpha = (-revealProvider() / revealMaxPx).coerceIn(0f, 1f) },
             )
+        }
+        Column(
+            horizontalAlignment = if (self) Alignment.End else Alignment.Start,
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset((shownX + revealProvider()).roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        if (dragMode == 0) dragMode = if (delta < 0f) -1 else 1
+                        if (dragMode == -1) {
+                            onReveal(delta)
+                        } else if (onSwipeReply != null) {
+                            val next = (dragPx + delta).coerceIn(0f, maxDragPx)
+                            if (next >= triggerPx && !firedThisDrag) {
+                                firedThisDrag = true
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            }
+                            dragPx = next
+                        }
+                    },
+                    onDragStopped = {
+                        if (dragMode == -1) {
+                            onRevealEnd()
+                        } else if (onSwipeReply != null) {
+                            val reached = dragPx >= triggerPx
+                            settleAnim.snapTo(dragPx)
+                            settling = true
+                            if (reached) onSwipeReply(msg)
+                            settleAnim.animateTo(0f)
+                            dragPx = 0f
+                            settling = false
+                        }
+                        firedThisDrag = false
+                        dragMode = 0
+                    },
+                )
+                .padding(
+                    start = if (self) 64.dp else 12.dp,
+                    end = if (self) 12.dp else 64.dp,
+                    top = if (first) groupTop else lineTop,
+                    bottom = 1.dp,
+                ),
+        ) {
+        if (first && !self) {
+            // Group header: nick (+ E2E lock). No inline time — timestamps are
+            // hidden and revealed by swiping the timeline left (iMessage style).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
+            ) {
+                Text(
+                    msg.nick,
+                    color = nickColor(msg.nick),
+                    fontSize = (baseSize - 3).sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (msg.e2e) {
+                    Spacer(Modifier.width(6.dp))
+                    LockGlyph(color = OnlineGreen, size = (baseSize - 5).dp)
+                }
+            }
         }
         // A message fully painted with one mIRC background becomes a bubble of
         // that color instead of colored stripes inside a gray bubble.
@@ -2607,28 +2871,9 @@ private fun MessageBubble(
                 }
             }
         }
-        if (last) {
-            // A drawn lock marks an end-to-end-encrypted message (the web client
-            // carries the flag but never shows it — we do).
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(
-                    start = if (self) 0.dp else 14.dp,
-                    end = if (self) 6.dp else 0.dp,
-                    top = 3.dp,
-                    bottom = 5.dp,
-                ),
-            ) {
-                if (msg.e2e) {
-                    LockGlyph(color = OnlineGreen, size = (baseSize - 4).dp)
-                    Spacer(Modifier.width(3.dp))
-                }
-                Text(
-                    formatTime(msg.time) ?: "",
-                    color = if (msg.e2e) OnlineGreen else TextSecondary,
-                    fontSize = (baseSize - 5).sp,
-                )
-            }
+            // Timestamps are hidden here and revealed by swiping left (iMessage
+            // style) — see the reveal overlay + drag above. Keeps the timeline
+            // dense (d3fc0n1) while per-message times stay one gesture away.
         }
     }
 }
@@ -3480,6 +3725,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { HighlightColorCard(prefs) }
                 item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
+                item { E2eBiometricLockCard(prefs) }
                 item { BackgroundConnectCard(prefs) }
                 item { ConnectionModeCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
@@ -3760,6 +4006,23 @@ private fun BiometricLockCard(prefs: Prefs) {
         subtitle = "Ask for fingerprint, face, or device PIN each time the app opens.",
         checked = on,
     ) { on = it; prefs.biometricLock = it }
+}
+
+@Composable
+private fun E2eBiometricLockCard(prefs: Prefs) {
+    val context = LocalContext.current
+    val canAuth = remember {
+        BiometricManager.from(context).canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+        ) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+    if (!canAuth) return
+    var on by remember { mutableStateOf(prefs.e2eBiometricLock) }
+    PrefToggleCard(
+        title = "Lock encrypted channels",
+        subtitle = "Require an unlock to open a secure (E2E) channel; re-locks when you leave the app.",
+        checked = on,
+    ) { on = it; prefs.e2eBiometricLock = it }
 }
 
 @Composable

@@ -34,6 +34,8 @@ fun nickColor(nick: String): Color {
 
 private val TIME_FORMAT_12 = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
 private val TIME_FORMAT_24 = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
+private val TIME_FORMAT_12_SEC = DateTimeFormatter.ofPattern("h:mm:ss a", Locale.US)
+private val TIME_FORMAT_24_SEC = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)
 
 /** ISO timestamp -> "12:45 PM" (or "12:45" when [Ui.clock24h]) in the device
  *  zone; null if unparseable. Reads Ui.clock24h so timestamps recompose live
@@ -41,6 +43,17 @@ private val TIME_FORMAT_24 = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
 fun formatTime(iso: String?): String? = try {
     iso?.let {
         val fmt = if (Ui.clock24h) TIME_FORMAT_24 else TIME_FORMAT_12
+        fmt.format(Instant.parse(it).atZone(ZoneId.systemDefault()))
+    }
+} catch (_: Exception) {
+    null
+}
+
+/** Like [formatTime] but with seconds — "12:45:07 PM" / "12:45:07". Used by the
+ *  swipe-to-reveal timestamp, where the extra precision is the point. */
+fun formatTimeWithSeconds(iso: String?): String? = try {
+    iso?.let {
+        val fmt = if (Ui.clock24h) TIME_FORMAT_24_SEC else TIME_FORMAT_12_SEC
         fmt.format(Instant.parse(it).atZone(ZoneId.systemDefault()))
     }
 } catch (_: Exception) {

@@ -114,6 +114,11 @@ open class LurkerClient {
      *  (RPL_TOPIC sync on join) and live `topic` changes; drives the topic bar. */
     val topics = mutableStateMapOf<String, String>()
 
+    /** "networkId::#target" -> current channel flag modes as a string ("mnt").
+     *  Fed by `channel-modes` (RPL_CHANNELMODEIS on join + live MODE changes);
+     *  drives the channel control panel's mode toggles/displays. */
+    val channelModes = mutableStateMapOf<String, String>()
+
     /** Message ids the user has bookmarked (saved). Synced from the server. */
     val bookmarkIds = mutableStateSetOf<Long>()
 
@@ -389,6 +394,7 @@ open class LurkerClient {
             nickNotes.clear()
             notifyAlways.clear()
             topics.clear()
+            channelModes.clear()
             chanlistRows.clear()
             searchResults.clear()
             highlightItems.clear()
@@ -743,6 +749,14 @@ open class LurkerClient {
                         val key = "$networkId::$target"
                         val t = frame.optString("topic")
                         if (t.isEmpty()) topics.remove(key) else topics[key] = t
+                    }
+                    return
+                }
+                // Current channel flag modes (RPL_CHANNELMODEIS on join + MODE
+                // changes) — drives the channel control panel. Ephemeral, no row.
+                if (frame.optString("type") == "channel-modes") {
+                    if (networkId != null) {
+                        channelModes["$networkId::$target"] = frame.optString("modes")
                     }
                     return
                 }
@@ -1604,6 +1618,47 @@ open class LurkerClient {
                     .toString(),
             )
         }
+        // Self-healing topic: the server only pushes the topic on join (RPL_TOPIC)
+        // and on live changes, so a channel we were already in before connecting
+        // never has one — the topic bar stays blank (d3fc0n1). Query it once; the
+        // RPL_TOPIC reply comes back as a `channel-topic` event and fills the bar.
+        if (buffer.isChannel && topics[buffer.key].isNullOrBlank()) {
+            ws?.send(
+                JSONObject()
+                    .put("type", "raw")
+                    .put("networkId", networkId)
+                    .put("line", "TOPIC ${buffer.target}")
+                    .toString(),
+            )
+        }
+        // Same self-heal for channel modes — query them once so the control panel
+        // shows the current flags for a channel we were already in (RPL_CHANNELMODEIS).
+        if (buffer.isChannel && channelModes[buffer.key] == null) {
+            ws?.send(
+                JSONObject()
+                    .put("type", "raw")
+                    .put("networkId", networkId)
+                    .put("line", "MODE ${buffer.target}")
+                    .toString(),
+            )
+        }
+    }
+
+    /** True when the channel has flag mode [mode] set (e.g. 'm', 't', 'i'). */
+    fun hasChannelMode(buffer: Buffer, mode: Char): Boolean =
+        channelModes[buffer.key]?.contains(mode) == true
+
+    /** Set/clear a simple channel flag mode via a raw MODE command. The server
+     *  (IRC) enforces op-only; a non-op's attempt just bounces with a notice. */
+    fun setChannelMode(buffer: Buffer, mode: Char, on: Boolean) {
+        val networkId = buffer.networkId ?: return
+        ws?.send(
+            JSONObject()
+                .put("type", "raw")
+                .put("networkId", networkId)
+                .put("line", "MODE ${buffer.target} ${if (on) "+" else "-"}$mode")
+                .toString(),
+        )
     }
 
     /** Ensure a DM/channel buffer exists, hydrate it, and return it for focusing. */
