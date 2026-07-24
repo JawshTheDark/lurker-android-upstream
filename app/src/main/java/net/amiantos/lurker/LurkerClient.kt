@@ -1121,6 +1121,17 @@ open class LurkerClient {
                     if (cn.optJSONObject(t)?.optBoolean("notifyAlways") == true) notifyAlways["$id::$t"] = true
                 }
             }
+            // peerPresence: { "nicklower": { nick, state, stateAt } } — the current
+            // online/away state of tracked friends/DM peers. Without applying this,
+            // a friend who was ALREADY online when we connected shows a grey dot
+            // until they next toggle (no live peer-presence event fires on connect),
+            // while the web client — which applies the snapshot — shows them online.
+            n.optJSONObject("peerPresence")?.let { pp ->
+                for (nk in pp.keys()) {
+                    val st = pp.optJSONObject(nk)?.optString("state")
+                    if (!st.isNullOrEmpty()) presence["$id::${nk.lowercase()}"] = st
+                }
+            }
             // The snapshot carries each channel's member roster inline.
             n.optJSONArray("channels")?.let { chans ->
                 for (c in 0 until chans.length()) {
