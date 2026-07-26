@@ -1572,10 +1572,15 @@ open class LurkerClient {
             c.primary?.let { "${it.networkId}::${it.nick}" == buffer.key } == true
         }?.displayName?.takeIf { it.isNotBlank() }
 
+    /** Raw presence state for a nick ("online" / "away" / "offline" / "back"), or
+     *  null when we've never heard — which the UI renders as grey "unknown". */
+    fun presenceState(networkId: Int?, nick: String): String? =
+        presence["${networkId}::${nick.lowercase()}"]
+
     /** True when a nick is known to be present (online/away/back — anything but
-     *  an explicit offline). Used to sort + dot the Friends buffer-list section. */
+     *  an explicit offline). Used to sort the Friends buffer-list section. */
     fun isPresent(networkId: Int?, nick: String): Boolean {
-        val st = presence["${networkId}::${nick.lowercase()}"]
+        val st = presenceState(networkId, nick)
         return st != null && st != "offline"
     }
 

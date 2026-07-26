@@ -1555,7 +1555,11 @@ private fun BufferListBody(
                                     ?.takeIf { it.isNotEmpty() }
                                     ?.let { m -> m.asReversed().take(150).any { it.e2e } }
                                     ?: (buffer.key in client.e2eSeen),
-                                online = if (isFriendRow) client.isPresent(buffer.networkId, buffer.target) else null,
+                                // "" (not null) when unknown: the row still shows a
+                                // dot, greyed, rather than dropping it entirely.
+                                presence = if (isFriendRow) {
+                                    client.presenceState(buffer.networkId, buffer.target).orEmpty()
+                                } else null,
                                 label = if (isFriendRow) client.friendDisplayName(buffer) else null,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
@@ -1625,9 +1629,16 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
         out.add(
             BufferSection(
                 "Friends",
+                // Online first, then away, then everyone else — matching the dot
+                // colours rather than lumping away in with online.
                 friendRows.sortedWith(
-                    compareByDescending<Buffer> { client.isPresent(it.networkId, it.target) }
-                        .thenBy { it.target.lowercase() },
+                    compareBy<Buffer> {
+                        when (client.presenceState(it.networkId, it.target)) {
+                            "online", "back" -> 0
+                            "away" -> 1
+                            else -> 2
+                        }
+                    }.thenBy { it.target.lowercase() },
                 ),
             ),
         )
@@ -1680,7 +1691,9 @@ private fun BufferRow(
     muted: Boolean = false,
     showNetwork: Boolean = false,
     e2e: Boolean = false,
-    online: Boolean? = null,
+    /** Raw presence state for a Friends row ("online"/"away"/"offline"/…), "" when
+     *  unknown, or null for a row that shows no presence dot at all. */
+    presence: String? = null,
     label: String? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
@@ -1729,13 +1742,14 @@ private fun BufferRow(
             .padding(16.dp, 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Presence dot for Friends rows: green when present, dim when offline.
-        if (online != null) {
+        // Presence dot for Friends rows, on the same colour guide as the Friends
+        // screen: green online, yellow away, red offline, grey unknown.
+        if (presence != null) {
             Box(
                 Modifier
                     .padding(end = 10.dp)
                     .size(9.dp)
-                    .background(if (online) OnlineGreen else TextSecondary.copy(alpha = 0.4f), CircleShape),
+                    .background(presenceColor(presence.ifEmpty { null }), CircleShape),
             )
         }
         Column(Modifier.weight(1f)) {
@@ -5944,6 +5958,19 @@ private fun AddIgnoreDialog(onDismiss: () -> Unit, onAdd: (String, List<String>)
     )
 }
 
+/**
+ * The one presence colour guide, shared by every surface that shows it: green
+ * online, yellow away, red offline, grey unknown (no identity on that network, or
+ * we simply haven't heard). [state] is a raw presence value from
+ * [LurkerClient.presenceOf] / the `presence` map.
+ */
+private fun presenceColor(state: String?): Color = when (state) {
+    "online", "back" -> OnlineGreen
+    "away" -> NoticeAmber
+    "offline" -> AlertRed
+    else -> TextSecondary
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
@@ -6023,13 +6050,11 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                         ) {
                             connectedNets.forEach { net ->
                                 val target = c.targets.firstOrNull { it.networkId == net.id }
-                                val color = when (target?.let { client.presenceOf(it) }) {
-                                    "online", "back" -> OnlineGreen
-                                    "away" -> NoticeAmber
-                                    "offline" -> AlertRed
-                                    else -> TextSecondary // no identity here, or unknown
-                                }
-                                Text(net.name, fontSize = 13.sp, color = color)
+                                Text(
+                                    net.name,
+                                    fontSize = 13.sp,
+                                    color = presenceColor(target?.let { client.presenceOf(it) }),
+                                )
                             }
                         }
                     }
