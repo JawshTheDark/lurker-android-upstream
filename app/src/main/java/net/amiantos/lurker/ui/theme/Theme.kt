@@ -76,6 +76,16 @@ object Ui {
      *  1f = fully dimmed to the canvas colour). */
     var backgroundDim by mutableStateOf(0.55f)
 
+    /** Per-buffer background override (buffer.key -> image path, or "" for "no
+     *  background here" even if a global one is set). Absent = inherit [backgroundUri]. */
+    val backgroundOverrides = mutableStateMapOf<String, String>()
+
+    /** Effective background image path for a buffer: its override (null when the
+     *  override is the "" = none sentinel), else the global default. */
+    fun backgroundFor(key: String): String? =
+        if (backgroundOverrides.containsKey(key)) backgroundOverrides[key]?.ifEmpty { null }
+        else backgroundUri
+
     /** Vertical-rhythm multiplier for [density], applied to message spacing. */
     val densityScale: Float get() = when (density) {
         "compact" -> 0.55f

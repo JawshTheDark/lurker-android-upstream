@@ -108,6 +108,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -296,6 +297,7 @@ class MainActivity : FragmentActivity() {
         Ui.nickColors = prefs.nickColors
         Ui.backgroundUri = prefs.backgroundUri
         Ui.backgroundDim = prefs.backgroundDim
+        Ui.backgroundOverrides.putAll(prefs.backgroundOverrides)
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
         // as Lurker mode and start immediately; only a genuinely fresh install
@@ -320,6 +322,22 @@ class MainActivity : FragmentActivity() {
                 // line, so declaring it here (below the gate) would forget the open
                 // chat on every unlock. Keeping it up top preserves it.
                 var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
+                // Back stack, so leaving a menu (or a nested channel) returns to
+                // where you were — not always the buffer list. Capped so a long
+                // session can't grow it without bound.
+                val backStack = remember { mutableStateListOf<Screen>() }
+                fun go(dest: Screen) {
+                    if (dest == screen) return
+                    backStack.add(screen)
+                    if (backStack.size > 32) backStack.removeAt(0)
+                    screen = dest
+                }
+                fun back() {
+                    val prev = if (backStack.isNotEmpty()) backStack.removeAt(backStack.lastIndex) else Screen.Buffers
+                    screen = prev
+                    // Re-activate the buffer we're returning to (null = not a chat).
+                    client.setActive((prev as? Screen.Chat)?.buffer)
+                }
 
                 // A dropped session (WS 401 → forceSignOutLocally) flips loggedIn
                 // false and clears the token without going through the UI sign-out,
@@ -468,15 +486,15 @@ class MainActivity : FragmentActivity() {
                             val b = buffer.networkId?.let { client.focusTarget(it, buffer.target) }
                                 ?: buffer.also { client.open(it) }
                             client.setActive(b)
-                            screen = Screen.Chat(b)
+                            go(Screen.Chat(b))
                         },
-                        onSettings = { client.loadSettings(); screen = Screen.Settings },
-                        onDcc = { client.loadDcc(); screen = Screen.Dcc },
-                        onNetworks = { client.loadNetworkConfigs(); screen = Screen.Networks },
-                        onSearch = { screen = Screen.Search },
-                        onFriends = { screen = Screen.Friends },
-                        onIgnores = { screen = Screen.Ignores },
-                        onBrowse = { screen = Screen.ChannelList() },
+                        onSettings = { client.loadSettings(); go(Screen.Settings) },
+                        onDcc = { client.loadDcc(); go(Screen.Dcc) },
+                        onNetworks = { client.loadNetworkConfigs(); go(Screen.Networks) },
+                        onSearch = { go(Screen.Search) },
+                        onFriends = { go(Screen.Friends) },
+                        onIgnores = { go(Screen.Ignores) },
+                        onBrowse = { go(Screen.ChannelList()) },
                         onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
@@ -485,47 +503,47 @@ class MainActivity : FragmentActivity() {
                         scrollToMsgId = s.scrollToMsgId,
                         sharedUri = sharedUri,
                         onShareConsumed = { sharedUri = null },
-                        onBack = { client.setActive(null); screen = Screen.Buffers },
+                        onBack = { back() },
                         onOpenBuffer = { buffer ->
                             client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            go(Screen.Chat(buffer))
                         },
-                        onBrowse = { q -> screen = Screen.ChannelList(q) },
-                        onSettings = { client.loadSettings(); screen = Screen.Settings },
+                        onBrowse = { q -> go(Screen.ChannelList(q)) },
+                        onSettings = { client.loadSettings(); go(Screen.Settings) },
                     )
-                    Screen.Settings -> SettingsScreen(client, prefs) { screen = Screen.Buffers }
+                    Screen.Settings -> SettingsScreen(client, prefs) { back() }
                     Screen.Dcc -> DccScreen(
                         client = client,
                         onOpenBuffer = { buffer ->
                             client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            go(Screen.Chat(buffer))
                         },
-                        onBack = { screen = Screen.Buffers },
+                        onBack = { back() },
                     )
                     Screen.Networks -> NetworksScreen(
                         client = client,
-                        onEdit = { screen = Screen.NetworkEdit(it) },
-                        onAdd = { screen = Screen.NetworkEdit(null) },
-                        onBack = { screen = Screen.Buffers },
+                        onEdit = { go(Screen.NetworkEdit(it)) },
+                        onAdd = { go(Screen.NetworkEdit(null)) },
+                        onBack = { back() },
                     )
                     Screen.Search -> SearchScreen(
                         client = client,
                         onOpenResult = { networkId, target ->
                             val buffer = client.focusTarget(networkId, target)
                             client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            go(Screen.Chat(buffer))
                         },
-                        onBack = { screen = Screen.Buffers },
+                        onBack = { back() },
                     )
                     Screen.Friends -> FriendsScreen(
                         client = client,
                         onOpenBuffer = { buffer ->
                             client.setActive(buffer)
-                            screen = Screen.Chat(buffer)
+                            go(Screen.Chat(buffer))
                         },
-                        onBack = { screen = Screen.Buffers },
+                        onBack = { back() },
                     )
-                    Screen.Ignores -> IgnoresScreen(client) { screen = Screen.Buffers }
+                    Screen.Ignores -> IgnoresScreen(client) { back() }
                     is Screen.ChannelList -> ChannelListScreen(
                         client = client,
                         initialQuery = (screen as Screen.ChannelList).query,
@@ -534,12 +552,12 @@ class MainActivity : FragmentActivity() {
                             // channel we actually land in (avoids the forwarded ghost).
                             client.join(networkId, chan)
                         },
-                        onBack = { screen = Screen.Buffers },
+                        onBack = { back() },
                     )
                     is Screen.NetworkEdit -> NetworkEditScreen(
                         client = client,
                         config = s.config,
-                        onBack = { screen = Screen.Networks },
+                        onBack = { back() },
                     )
                 }
                 }
@@ -1055,6 +1073,35 @@ private fun ChannelControlPanel(
                     Prefs(panelCtx).compactOverrides = Ui.compactOverrides.toMap()
                 }
 
+                // Per-channel background image (overrides the global one for THIS
+                // channel; "None here" hides it even if a global one is set).
+                val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+                    if (uri != null) {
+                        runCatching {
+                            val dir = panelCtx.filesDir
+                            val safe = buffer.key.replace(Regex("[^A-Za-z0-9]"), "_")
+                            dir.listFiles { f -> f.name.startsWith("ch_bg_${safe}_") }?.forEach { it.delete() }
+                            val dst = File(dir, "ch_bg_${safe}_${System.currentTimeMillis()}.jpg")
+                            panelCtx.contentResolver.openInputStream(uri)?.use { i -> dst.outputStream().use { i.copyTo(it) } }
+                            Ui.backgroundOverrides[buffer.key] = dst.absolutePath
+                            Prefs(panelCtx).backgroundOverrides = Ui.backgroundOverrides.toMap()
+                        }
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("CHANNEL BACKGROUND", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    fun persistBg() { Prefs(panelCtx).backgroundOverrides = Ui.backgroundOverrides.toMap() }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        PanelActionChip("Set image") {
+                            bgPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }
+                        PanelActionChip("None here") { Ui.backgroundOverrides[buffer.key] = ""; persistBg() }
+                        if (buffer.key in Ui.backgroundOverrides) {
+                            PanelActionChip("Use default") { Ui.backgroundOverrides.remove(buffer.key); persistBg() }
+                        }
+                    }
+                }
+
                 TextButton(
                     onClick = onMembers,
                     modifier = Modifier.align(Alignment.End),
@@ -1096,6 +1143,21 @@ private fun PanelToggleRow(label: String, checked: Boolean, onChange: (Boolean) 
             )
         }
     }
+}
+
+/** A small tappable action pill used in the channel control panel. */
+@Composable
+private fun PanelActionChip(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        color = AccentBlue,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(PillGray, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
 }
 
 /** Full-bleed cover shown while the biometric lock is engaged. [e2e] switches the
@@ -1998,14 +2060,17 @@ private fun ChatScreen(
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
-        if (openScrollDone && anchorId == null && atBottom) {
+        // Never follow the tail while the user is actively scrolling — otherwise a
+        // fling that's still within the atBottom slack gets yanked back down by the
+        // next append, which on a busy channel repeats and traps them at the bottom.
+        if (openScrollDone && anchorId == null && atBottom && !listState.isScrollInProgress) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
     }
     // An image resizing its card mustn't shove the tail out from under a reader
-    // who's sitting at the bottom — re-pin when one loads.
+    // who's sitting at the bottom — re-pin when one loads (but not mid-scroll).
     LaunchedEffect(mediaTick) {
-        if (mediaTick > 0 && openScrollDone && anchorId == null && atBottom) {
+        if (mediaTick > 0 && openScrollDone && anchorId == null && atBottom && !listState.isScrollInProgress) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
     }
@@ -2055,7 +2120,7 @@ private fun ChatScreen(
         // as the base haze source, dimmed for text legibility; otherwise the
         // animated ambient wash is the base. Either way it's zIndex 0 so the top
         // bar and composer blur it, and messages layer on top at zIndex 1.
-        val bgPath = Ui.backgroundUri
+        val bgPath = Ui.backgroundFor(buffer.key)
         if (bgPath != null) {
             AsyncImage(
                 model = File(bgPath),
@@ -2109,6 +2174,7 @@ private fun ChatScreen(
                             onAction = { actionMsg = it },
                             onMediaLoaded = { mediaTick++ },
                             flash = row.msg.id == flashMsgId,
+                            onNickTap = { replyTo(row.msg) },
                         )
                     } else MessageBubble(
                         row.msg, row.first, row.last, baseSize, openLink,
@@ -3094,6 +3160,7 @@ private fun CompactMessageRow(
     onAction: ((Msg) -> Unit)? = null,
     onMediaLoaded: () -> Unit = {},
     flash: Boolean = false,
+    onNickTap: (() -> Unit)? = null,
 ) {
     val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
     val goldHighlight = !msg.self && paintedBg == null && (msg.matched || flash)
@@ -3103,7 +3170,16 @@ private fun CompactMessageRow(
         if (time != null) {
             withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
         }
-        withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
+        // Compact mode has no swipe-to-reply, so the nick itself is tappable to
+        // drop a "nick, " ping into the composer (d3fc0n).
+        val nickStyle = SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)
+        if (onNickTap != null) {
+            withLink(LinkAnnotation.Clickable("nick", linkInteractionListener = { onNickTap() })) {
+                withStyle(nickStyle) { append(msg.nick) }
+            }
+        } else {
+            withStyle(nickStyle) { append(msg.nick) }
+        }
         append("  ")
         val body = mircAnnotated(msg.text, AccentBlue, onLink)
         when (msg.type) {

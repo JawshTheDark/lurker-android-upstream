@@ -114,6 +114,15 @@ class Prefs(context: Context) {
         get() = sp.getFloat("backgroundDim", 0.55f)
         set(value) = sp.edit { putFloat("backgroundDim", value) }
 
+    /** Per-buffer background overrides (buffer.key -> path; "" = none), JSON. */
+    var backgroundOverrides: Map<String, String>
+        get() = runCatching {
+            val s = sp.getString("backgroundOverrides", null) ?: return emptyMap()
+            val o = JSONObject(s)
+            o.keys().asSequence().associateWith { o.getString(it) }
+        }.getOrDefault(emptyMap())
+        set(value) = sp.edit { putString("backgroundOverrides", JSONObject(value as Map<*, *>).toString()) }
+
     /** Buffer keys known to carry E2E — drives the sidebar lock before a buffer's
      *  history is loaded. (SharedPreferences returns an unmodifiable set; copy.) */
     var e2eBuffers: Set<String>
