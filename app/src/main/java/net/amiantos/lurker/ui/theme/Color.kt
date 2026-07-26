@@ -25,6 +25,7 @@ private val NICK_COLORS = listOf(
 )
 
 fun nickColor(nick: String): Color {
+    if (!Ui.nickColors) return TextPrimary
     if (nick.isEmpty()) return NICK_COLORS[0]
     // Case-folded stable hash so Nick and nick collide on purpose.
     var h = 0

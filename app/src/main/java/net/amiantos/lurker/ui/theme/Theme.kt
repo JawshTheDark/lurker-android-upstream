@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 
 /** The app's three looks. OLED is the original pure-black design. */
 enum class AppTheme(val id: String, val label: String) {
@@ -51,6 +52,43 @@ object Ui {
 
     /** Effective compact setting for a buffer: its override, else the default. */
     fun compactFor(key: String): Boolean = compactOverrides[key] ?: compact
+
+    // ---- Appearance overhaul -------------------------------------------------
+
+    /** User accent/UI colour override (ARGB); 0 = theme default. Recolours links,
+     *  buttons, active toggles, own message bubbles, the send button, etc. */
+    var accentColor by mutableStateOf(0)
+
+    /** Chat font family: "system" | "rounded" | "mono" | "serif". */
+    var fontFamily by mutableStateOf("system")
+
+    /** Message density preset: "compact" | "cozy" | "comfortable" — scales the
+     *  vertical rhythm between messages. */
+    var density by mutableStateOf("cozy")
+
+    /** Colour nicks by a stable hash (true) or render them plain (false). */
+    var nickColors by mutableStateOf(true)
+
+    /** Custom chat background image (content URI string), or null for none. */
+    var backgroundUri by mutableStateOf<String?>(null)
+
+    /** How much to dim a background image for text legibility (0f = none,
+     *  1f = fully dimmed to the canvas colour). */
+    var backgroundDim by mutableStateOf(0.55f)
+
+    /** Vertical-rhythm multiplier for [density], applied to message spacing. */
+    val densityScale: Float get() = when (density) {
+        "compact" -> 0.55f
+        "comfortable" -> 1.35f
+        else -> 1f
+    }
+
+    /** The chat [FontFamily] for [fontFamily] (all built-in, no bundled fonts). */
+    val chatFont: FontFamily get() = when (fontFamily) {
+        "mono" -> FontFamily.Monospace
+        "serif" -> FontFamily.Serif
+        else -> FontFamily.Default
+    }
 }
 
 private data class Palette(
@@ -137,7 +175,9 @@ val SurfaceDark: Color get() = palette.surface
 val SurfaceRaised: Color get() = palette.raised
 val PillGray: Color get() = palette.pill
 val GlassBorder: Color get() = palette.border
-val AccentBlue: Color get() = palette.accent
+/** The live accent: the user's override when set, else the theme default. */
+val effectiveAccent: Color get() = if (Ui.accentColor != 0) Color(Ui.accentColor) else palette.accent
+val AccentBlue: Color get() = effectiveAccent
 val AlertRed: Color get() = palette.red
 val TextPrimary: Color get() = palette.textPrimary
 val TextSecondary: Color get() = palette.textSecondary
@@ -150,7 +190,7 @@ fun LurkerTheme(content: @Composable () -> Unit) {
     val p = palette
     val scheme = if (p.dark) {
         darkColorScheme(
-            primary = p.accent,
+            primary = effectiveAccent,
             onPrimary = Color.White,
             secondary = p.textSecondary,
             tertiary = p.amber,
@@ -168,7 +208,7 @@ fun LurkerTheme(content: @Composable () -> Unit) {
         )
     } else {
         lightColorScheme(
-            primary = p.accent,
+            primary = effectiveAccent,
             onPrimary = Color.White,
             secondary = p.textSecondary,
             tertiary = p.amber,

@@ -82,6 +82,38 @@ class Prefs(context: Context) {
         get() = sp.getInt("highlightColor", 0)
         set(value) = sp.edit { putInt("highlightColor", value) }
 
+    // ---- Appearance overhaul -------------------------------------------------
+
+    /** Accent/UI colour override (ARGB). 0 = theme default. */
+    var accentColor: Int
+        get() = sp.getInt("accentColor", 0)
+        set(value) = sp.edit { putInt("accentColor", value) }
+
+    /** Chat font family: "system" | "rounded" | "mono" | "serif". */
+    var fontFamily: String
+        get() = sp.getString("fontFamily", "system") ?: "system"
+        set(value) = sp.edit { putString("fontFamily", value) }
+
+    /** Message density: "compact" | "cozy" | "comfortable". */
+    var density: String
+        get() = sp.getString("density", "cozy") ?: "cozy"
+        set(value) = sp.edit { putString("density", value) }
+
+    /** Colour nicks by hash (true) or render them plain (false). */
+    var nickColors: Boolean
+        get() = sp.getBoolean("nickColors", true)
+        set(value) = sp.edit { putBoolean("nickColors", value) }
+
+    /** Custom chat background image URI (persisted content:// string), or null. */
+    var backgroundUri: String?
+        get() = sp.getString("backgroundUri", null)
+        set(value) = sp.edit { if (value == null) remove("backgroundUri") else putString("backgroundUri", value) }
+
+    /** Background-image dim, 0f..1f. */
+    var backgroundDim: Float
+        get() = sp.getFloat("backgroundDim", 0.55f)
+        set(value) = sp.edit { putFloat("backgroundDim", value) }
+
     /** Buffer keys known to carry E2E — drives the sidebar lock before a buffer's
      *  history is loaded. (SharedPreferences returns an unmodifiable set; copy.) */
     var e2eBuffers: Set<String>

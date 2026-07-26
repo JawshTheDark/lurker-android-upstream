@@ -145,6 +145,9 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.material3.Slider
+import androidx.compose.ui.graphics.toArgb
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -287,6 +290,12 @@ class MainActivity : FragmentActivity() {
         Ui.highlightColor = prefs.highlightColor
         Ui.compact = prefs.compactMessages
         Ui.compactOverrides.putAll(prefs.compactOverrides)
+        Ui.accentColor = prefs.accentColor
+        Ui.fontFamily = prefs.fontFamily
+        Ui.density = prefs.density
+        Ui.nickColors = prefs.nickColors
+        Ui.backgroundUri = prefs.backgroundUri
+        Ui.backgroundDim = prefs.backgroundDim
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
         // as Lurker mode and start immediately; only a genuinely fresh install
@@ -2042,9 +2051,22 @@ private fun ChatScreen(
     var bottomBarHeightPx by remember { mutableStateOf(0) }
 
     Box(Modifier.fillMaxSize().background(CanvasBlack)) {
-        // Ambient wash is the base haze source (zIndex 0) so the bars blur it even
-        // where the message list is sparse; messages layer on top at zIndex 1.
-        AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
+        // A custom chat background image (device-local) replaces the ambient wash
+        // as the base haze source, dimmed for text legibility; otherwise the
+        // animated ambient wash is the base. Either way it's zIndex 0 so the top
+        // bar and composer blur it, and messages layer on top at zIndex 1.
+        val bgPath = Ui.backgroundUri
+        if (bgPath != null) {
+            AsyncImage(
+                model = File(bgPath),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 0f),
+            )
+            Box(Modifier.fillMaxSize().background(CanvasBlack.copy(alpha = Ui.backgroundDim)))
+        } else {
+            AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
+        }
         // Chat text follows the synced look.font.size.mobile setting (web px
         // ~ sp); +2 keeps the historical default (14 -> 16sp). Ui.chatTextScale
         // is the device-local bump (tablets read tiny at the mobile default).
@@ -2907,9 +2929,9 @@ private fun MessageBubble(
     // Vertical rhythm scales with the chat font so small fonts don't read as
     // paradoxically airy (d3fc0n1's note): at the default baseSize 16 these
     // resolve to today's exact values (7 / 8 / 2), only the extremes shift.
-    val vPad = (baseSize * 0.44f).dp      // inner bubble top+bottom
-    val groupTop = (baseSize * 0.5f).dp   // gap above a new sender group
-    val lineTop = (baseSize * 0.13f).dp   // gap between lines in one group
+    val vPad = (baseSize * 0.44f).dp                       // inner bubble top+bottom
+    val groupTop = (baseSize * 0.5f * Ui.densityScale).dp  // gap above a new sender group
+    val lineTop = (baseSize * 0.13f * Ui.densityScale).dp  // gap between lines in one group
     val shape = RoundedCornerShape(
         topStart = if (!self && !first) tight else big,
         topEnd = if (self && !first) tight else big,
@@ -3039,6 +3061,7 @@ private fun MessageBubble(
                     else -> TextPrimary
                 },
                 fontSize = baseSize.sp,
+                fontFamily = Ui.chatFont,
             )
         }
         // Inline media thumbnails (device-local toggle). Tap → the full viewer via
@@ -3094,9 +3117,9 @@ private fun CompactMessageRow(
             .fillMaxWidth()
             .background(if (goldHighlight) highlightBg.copy(alpha = 0.16f) else Color.Transparent)
             .then(if (onAction != null) Modifier.combinedClickable(onClick = {}, onLongClick = { onAction(msg) }) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 1.5.dp),
+            .padding(horizontal = 12.dp, vertical = (1.5f * Ui.densityScale).dp),
     ) {
-        Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary)
+        Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary, fontFamily = Ui.chatFont)
         if (Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
@@ -3129,7 +3152,8 @@ private fun CompactActionRow(msg: Msg, baseSize: Int, onLink: ((String) -> Unit)
         line,
         fontSize = baseSize.sp,
         lineHeight = (baseSize + 3).sp,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.5.dp),
+        fontFamily = Ui.chatFont,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = (1.5f * Ui.densityScale).dp),
     )
 }
 
@@ -3978,7 +4002,12 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { InlineMediaCard(prefs) }
                 item { ClockFormatCard(prefs) }
                 item { CompactMessagesCard(prefs) }
+                item { AccentColorCard(prefs) }
                 item { HighlightColorCard(prefs) }
+                item { FontFamilyCard(prefs) }
+                item { DensityCard(prefs) }
+                item { NickColorsCard(prefs) }
+                item { ChatBackgroundCard(prefs) }
                 item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
                 item { E2eBiometricLockCard(prefs) }
@@ -4201,6 +4230,194 @@ private fun CompactMessagesCard(prefs: Prefs) {
             Switch(
                 checked = Ui.compact,
                 onCheckedChange = { Ui.compact = it; prefs.compactMessages = it },
+            )
+        }
+    }
+}
+
+private val ACCENT_SWATCHES: List<Int> = listOf(
+    0xFF0A84FF, 0xFF30D158, 0xFFFF375F, 0xFFBF5AF2, 0xFFFF9F0A,
+    0xFFFFD60A, 0xFF64D2FF, 0xFFFF6482, 0xFF66D4CF, 0xFF5E5CE6,
+).map { it.toInt() }
+
+/** Reusable settings-card shell. */
+@Composable
+private fun AppearanceCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.padding(16.dp, 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+    }
+}
+
+/** A pill-segment selector used by the font/density cards. */
+@Composable
+private fun OptionCard(
+    title: String,
+    subtitle: String,
+    options: List<Pair<String, String>>,
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    AppearanceCard {
+        Text(title, fontSize = 17.sp)
+        Text(subtitle, color = TextSecondary, fontSize = 12.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { (id, label) ->
+                val sel = id == selected
+                Text(
+                    label,
+                    color = if (sel) Color.White else TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (sel) AccentBlue else PillGray, RoundedCornerShape(10.dp))
+                        .clickable { onSelect(id) }
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccentColorCard(prefs: Prefs) {
+    var showCustom by remember { mutableStateOf(false) }
+    AppearanceCard {
+        Text("Accent colour", fontSize = 17.sp)
+        Text("Recolours links, buttons, toggles and your own messages.", color = TextSecondary, fontSize = 12.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Reset-to-theme chip.
+            Box(
+                Modifier.size(30.dp).clip(CircleShape).background(SurfaceRaised, CircleShape)
+                    .border(if (Ui.accentColor == 0) 2.dp else 1.dp, if (Ui.accentColor == 0) AccentBlue else PillGray, CircleShape)
+                    .clickable { Ui.accentColor = 0; prefs.accentColor = 0 },
+                contentAlignment = Alignment.Center,
+            ) { Text("↺", color = TextSecondary, fontSize = 13.sp) }
+            ACCENT_SWATCHES.forEach { argb ->
+                val sel = Ui.accentColor == argb
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).background(Color(argb), CircleShape)
+                        .border(if (sel) 2.dp else 1.dp, if (sel) Color.White else PillGray, CircleShape)
+                        .clickable { Ui.accentColor = argb; prefs.accentColor = argb },
+                )
+            }
+            // Custom picker.
+            Box(
+                Modifier.size(30.dp).clip(CircleShape).border(1.dp, PillGray, CircleShape).clickable { showCustom = true },
+                contentAlignment = Alignment.Center,
+            ) { Text("+", color = TextSecondary, fontSize = 16.sp) }
+        }
+    }
+    if (showCustom) {
+        ColorPickerDialog(
+            initial = if (Ui.accentColor != 0) Ui.accentColor else AccentBlue.toArgb(),
+            onDismiss = { showCustom = false },
+            onPick = { argb -> Ui.accentColor = argb; prefs.accentColor = argb; showCustom = false },
+        )
+    }
+}
+
+/** A simple HSV colour picker (hue / saturation / brightness sliders + preview). */
+@Composable
+private fun ColorPickerDialog(initial: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+    val start = remember { FloatArray(3).also { android.graphics.Color.colorToHSV(initial, it) } }
+    var h by remember { mutableStateOf(start[0]) }
+    var s by remember { mutableStateOf(start[1]) }
+    var v by remember { mutableStateOf(start[2]) }
+    val argb = android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(color = SurfaceDark, shape = RoundedCornerShape(16.dp), border = BorderStroke(0.5.dp, GlassBorder)) {
+            Column(Modifier.padding(16.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Custom colour", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(10.dp)).background(Color(argb)))
+                Text("Hue", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = h, onValueChange = { h = it }, valueRange = 0f..360f)
+                Text("Saturation", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = s, onValueChange = { s = it }, valueRange = 0f..1f)
+                Text("Brightness", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = v, onValueChange = { v = it }, valueRange = 0f..1f)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) }
+                    TextButton(onClick = { onPick(argb) }) { Text("Use colour", color = AccentBlue, fontWeight = FontWeight.SemiBold) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FontFamilyCard(prefs: Prefs) = OptionCard(
+    "Chat font", "Typeface for message text.",
+    listOf("system" to "System", "serif" to "Serif", "mono" to "Monospace"),
+    Ui.fontFamily,
+) { Ui.fontFamily = it; prefs.fontFamily = it }
+
+@Composable
+private fun DensityCard(prefs: Prefs) = OptionCard(
+    "Message density", "Spacing between messages.",
+    listOf("compact" to "Compact", "cozy" to "Cozy", "comfortable" to "Comfortable"),
+    Ui.density,
+) { Ui.density = it; prefs.density = it }
+
+@Composable
+private fun NickColorsCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark, shape = RoundedCornerShape(12.dp), border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Colour nicknames", fontSize = 17.sp)
+                Text("Give each person a consistent colour (off = plain text).", color = TextSecondary, fontSize = 12.sp)
+            }
+            Switch(checked = Ui.nickColors, onCheckedChange = { Ui.nickColors = it; prefs.nickColors = it })
+        }
+    }
+}
+
+@Composable
+private fun ChatBackgroundCard(prefs: Prefs) {
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            runCatching {
+                val dir = context.filesDir
+                dir.listFiles { f -> f.name.startsWith("chat_bg_") }?.forEach { it.delete() }
+                val dst = File(dir, "chat_bg_${System.currentTimeMillis()}.jpg")
+                context.contentResolver.openInputStream(uri)?.use { input -> dst.outputStream().use { input.copyTo(it) } }
+                Ui.backgroundUri = dst.absolutePath
+                prefs.backgroundUri = dst.absolutePath
+            }
+        }
+    }
+    AppearanceCard {
+        Text("Chat background", fontSize = 17.sp)
+        Text("Use a photo from your device behind your chats.", color = TextSecondary, fontSize = 12.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
+                Text(if (Ui.backgroundUri == null) "Choose image" else "Change image", color = AccentBlue)
+            }
+            if (Ui.backgroundUri != null) {
+                TextButton(onClick = { Ui.backgroundUri = null; prefs.backgroundUri = null }) {
+                    Text("Remove", color = AlertRed)
+                }
+            }
+        }
+        if (Ui.backgroundUri != null) {
+            Text("Dim for readability", color = TextSecondary, fontSize = 12.sp)
+            Slider(
+                value = Ui.backgroundDim,
+                onValueChange = { Ui.backgroundDim = it; prefs.backgroundDim = it },
+                valueRange = 0f..0.9f,
             )
         }
     }
