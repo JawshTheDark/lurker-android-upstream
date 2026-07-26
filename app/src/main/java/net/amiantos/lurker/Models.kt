@@ -111,6 +111,22 @@ data class Msg(
     /** True when this message matched a highlight rule (a mention / your nick) —
      *  drives the gold highlight background. */
     val matched: Boolean = false,
+    /** Set on an undelivered-send line; keys the [FailedSend] holding the original
+     *  text so the row can offer Resend / Discard. */
+    val failedId: String? = null,
+)
+
+/** A message that never made it out — the socket was down, the server rejected it,
+ *  or no ack arrived. Retained so the user can resend it verbatim. */
+data class FailedSend(
+    val id: String,
+    val bufferKey: String,
+    val networkId: Int,
+    val target: String,
+    /** The original WireOp type: "send" | "action" | "notice". */
+    val type: String,
+    val text: String,
+    val reason: String,
 )
 
 /** An inbound DCC file transfer, mirrored from the server's transfer rows. */

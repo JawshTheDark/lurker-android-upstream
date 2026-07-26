@@ -2251,12 +2251,30 @@ private fun ChatScreen(
                         onRevealEnd = { revealScope.launch { revealAnim.animateTo(0f) } },
                     )
                     is ChatRow.Action -> if (Ui.compact) CompactActionRow(row.msg, baseSize, openLink) else ActionLine(row.msg, baseSize, openLink)
-                    is ChatRow.SystemLine -> SystemLine(
-                        row.msg,
-                        onJoin = if (buffer.networkId != null) {
-                            { chan -> joinPrompt = chan }
-                        } else null,
-                    )
+                    is ChatRow.SystemLine -> {
+                        // An undelivered message gets its text back plus Resend /
+                        // Discard, instead of a dead-end notice.
+                        val failed = row.msg.failedId?.let { client.failedSends[it] }
+                        if (failed != null) {
+                            FailedSendRow(
+                                failed = failed,
+                                baseSize = baseSize,
+                                onResend = { client.resendFailed(failed.id) },
+                                onDiscard = { client.discardFailed(failed.id) },
+                                onCopyToComposer = {
+                                    val t = draft.text.ifEmpty { "" } + failed.text
+                                    draft = TextFieldValue(t, TextRange(t.length))
+                                    client.setDraftLocal(buffer, t)
+                                    client.discardFailed(failed.id)
+                                },
+                            )
+                        } else SystemLine(
+                            row.msg,
+                            onJoin = if (buffer.networkId != null) {
+                                { chan -> joinPrompt = chan }
+                            } else null,
+                        )
+                    }
                     ChatRow.NewMessages -> NewMessagesDivider()
                 }
             }
@@ -3308,6 +3326,61 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)?
         // Vertical padding tracks the font (default 16 → 5.dp), matching bubbles.
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = (baseSize * 0.31f).dp),
     )
+}
+
+/**
+ * An undelivered message. Shows the text you actually typed (not a truncated
+ * notice) in a red-edged card with why it failed, and the two things you'd want:
+ * send it again, or take it back into the composer to edit. Sits inline where the
+ * message would have appeared.
+ */
+@Composable
+private fun FailedSendRow(
+    failed: FailedSend,
+    baseSize: Int,
+    onResend: () -> Unit,
+    onDiscard: () -> Unit,
+    onCopyToComposer: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.End,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(AlertRed.copy(alpha = 0.10f), RoundedCornerShape(14.dp))
+                .border(0.5.dp, AlertRed.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("⚠", color = AlertRed, fontSize = (baseSize - 3).sp)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Not delivered — ${failed.reason}",
+                    color = AlertRed,
+                    fontSize = (baseSize - 4).sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                failed.text,
+                color = TextPrimary,
+                fontSize = baseSize.sp,
+                fontFamily = Ui.chatFont,
+            )
+            Spacer(Modifier.height(7.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PanelActionChip("Resend", onResend)
+                PanelActionChip("Edit", onCopyToComposer)
+                PanelActionChip("Discard", onDiscard)
+            }
+        }
+    }
 }
 
 /**

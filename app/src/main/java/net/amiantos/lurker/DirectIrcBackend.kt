@@ -425,7 +425,21 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
 
     // ---- Sending: WireOps -> KICL -----------------------------------------
     override fun execute(buffer: Buffer, ops: List<WireOp>) {
-        val client = manager.get(buffer.networkId ?: return) ?: return
+        val networkId = buffer.networkId ?: return
+        // Not connected to this network: retain any user text as a failed send the
+        // user can retry, rather than dropping it silently.
+        val client = manager.get(networkId) ?: run {
+            post {
+                for (op in ops) {
+                    if (op.type !in SENDABLE_OPS) continue
+                    val target = op.target ?: buffer.target
+                    recordFailedSend(
+                        "$networkId::$target", networkId, target, op.type, op.text.orEmpty(), "not connected",
+                    )
+                }
+            }
+            return
+        }
         for (op in ops) {
             when (op.type) {
                 "send" -> {

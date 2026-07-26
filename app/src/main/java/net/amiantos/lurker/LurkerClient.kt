@@ -37,6 +37,9 @@ import java.util.concurrent.TimeUnit
  * native client this size; lurker#492's transport-adapter seam is the next step
  * if it grows further.
  */
+/** WireOp types carrying user text, so a drop is worth retaining for a retry. */
+internal val SENDABLE_OPS = setOf("send", "action", "notice")
+
 open class LurkerClient {
     /** True for the Lurker-server backend; DirectIrcBackend overrides to false to
      *  hide server-only surfaces (search, highlights, DCC, settings registry,
@@ -173,9 +176,20 @@ open class LurkerClient {
 
     // Outstanding sends awaiting their send-result ack (clientId -> context).
     // The web client uses the same 8s deadline before declaring a send lost.
-    private data class PendingSend(val bufferKey: String, val text: String)
+    private data class PendingSend(
+        val bufferKey: String,
+        val networkId: Int,
+        val target: String,
+        val type: String,
+        val text: String,
+    )
     private val pendingSends = mutableMapOf<String, PendingSend>()
     private var clientIdSeq = 0
+
+    /** Undelivered sends, keyed by [FailedSend.id]. The chat renders each one as a
+     *  row with Resend / Discard; entries live until the user acts on them. */
+    val failedSends = mutableStateMapOf<String, FailedSend>()
+    private var failedSeq = 0
 
     /** bufferKey -> server read cursor (highest id the user has read). */
     private val lastRead = mutableMapOf<String, Long>()
@@ -1071,18 +1085,60 @@ open class LurkerClient {
 
     private fun failSend(clientId: String, reason: String) {
         val pending = pendingSends.remove(clientId) ?: return
-        val preview = pending.text.let { if (it.length > 80) it.take(77) + "…" else it }
+        recordFailedSend(pending.bufferKey, pending.networkId, pending.target, pending.type, pending.text, reason)
+    }
+
+    /**
+     * Surface an undelivered message: retain the original text under a [FailedSend]
+     * and drop an inline row in the buffer offering Resend / Discard. Called for a
+     * server rejection, a missing ack, and — the common case on a flaky connection —
+     * a send attempted with no live socket at all.
+     */
+    protected fun recordFailedSend(
+        bufferKey: String,
+        networkId: Int,
+        target: String,
+        type: String,
+        text: String,
+        reason: String,
+    ) {
+        val id = "f${++failedSeq}"
+        failedSends[id] = FailedSend(id, bufferKey, networkId, target, type, text, reason)
+        val preview = if (text.length > 80) text.take(77) + "…" else text
         mergeInto(
-            pending.bufferKey,
+            bufferKey,
             listOf(
                 Msg(
                     id = 0, type = "send-failed", nick = "",
                     text = "⚠ Not delivered ($reason): “$preview”",
-                    self = false, system = true,
+                    self = false, system = true, failedId = id,
                 ),
             ),
             replace = false,
         )
+    }
+
+    /** Drop a failed send's record and its inline row from the buffer. */
+    private fun clearFailed(failed: FailedSend) {
+        failedSends.remove(failed.id)
+        messagesByBuffer[failed.bufferKey]
+            ?.filterNot { it.failedId == failed.id }
+            ?.let { messagesByBuffer[failed.bufferKey] = it }
+    }
+
+    /** Retry an undelivered message verbatim. The row disappears; if the send fails
+     *  again a fresh one takes its place (with the new reason). */
+    fun resendFailed(id: String) {
+        val failed = failedSends[id] ?: return
+        clearFailed(failed)
+        val buffer = buffers.firstOrNull { it.key == failed.bufferKey }
+            ?: Buffer(failed.networkId, failed.target, networkNames[failed.networkId] ?: "network")
+        execute(buffer, listOf(WireOp(failed.type, target = failed.target, text = failed.text)))
+    }
+
+    /** Give up on an undelivered message — removes the row and the retained text. */
+    fun discardFailed(id: String) {
+        failedSends[id]?.let(::clearFailed)
     }
 
     private fun applyNetworks(arr: JSONArray) {
@@ -1768,7 +1824,19 @@ open class LurkerClient {
 
     open fun execute(buffer: Buffer, ops: List<WireOp>) {
         val networkId = buffer.networkId ?: return
-        val socket = ws ?: return
+        // No live socket (offline / mid-reconnect): a message would otherwise vanish
+        // without a trace. Retain it as a failed send the user can retry instead.
+        val socket = ws ?: run {
+            for (op in ops) {
+                if (op.type !in SENDABLE_OPS) continue
+                val target = op.target ?: buffer.target
+                recordFailedSend(
+                    "$networkId::$target", networkId, target, op.type, op.text.orEmpty(),
+                    if (connected) "connecting" else "offline",
+                )
+            }
+            return
+        }
         for (op in ops) {
             val target = op.target ?: buffer.target
             val frame = JSONObject().put("networkId", networkId)
@@ -1780,7 +1848,7 @@ open class LurkerClient {
                     val clientId = "a${++clientIdSeq}"
                     frame.put("clientId", clientId)
                     val key = "${networkId}::$target"
-                    pendingSends[clientId] = PendingSend(key, op.text.orEmpty())
+                    pendingSends[clientId] = PendingSend(key, networkId, target, op.type, op.text.orEmpty())
                     main.postDelayed({ failSend(clientId, "no acknowledgement (timeout)") }, SEND_ACK_TIMEOUT)
                 }
                 "raw" -> frame.put("type", "raw").put("line", op.line)
