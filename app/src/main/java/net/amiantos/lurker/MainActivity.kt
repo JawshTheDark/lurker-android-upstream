@@ -5552,6 +5552,7 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
         },
     ) { padding ->
         val friends = remember(client.contacts.toList()) { client.contacts.sortedBy { it.displayName.lowercase() } }
+        val connectedNets = client.networks.values.filter { it.connected }.sortedBy { it.name }
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             if (friends.isEmpty()) {
                 item {
@@ -5560,6 +5561,20 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                         color = TextSecondary,
                         modifier = Modifier.padding(24.dp),
                     )
+                }
+            } else {
+                // Colour key: each word IS its status colour.
+                item {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Text("online", color = OnlineGreen, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("away", color = NoticeAmber, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("offline", color = AlertRed, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("unknown", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                    HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 20.dp))
                 }
             }
             items(friends.size) { i ->
@@ -5576,31 +5591,23 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(c.displayName, fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
-                        // One line per network the friend is on, each with its own
-                        // online / idle / offline dot.
-                        c.targets.forEach { t ->
-                            val st = client.presenceOf(t)
-                            val dot = when (st) {
-                                "online", "back" -> OnlineGreen
-                                "away" -> NoticeAmber
-                                else -> TextSecondary
-                            }
-                            val label = when (st) {
-                                "online", "back" -> "online"
-                                "away" -> "idle"
-                                else -> "offline"
-                            }
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(top = 3.dp),
-                            ) {
-                                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
-                                Text(
-                                    "${t.nick} · ${client.networks[t.networkId]?.name ?: "net ${t.networkId}"} · $label",
-                                    fontSize = 12.5.sp,
-                                    color = TextSecondary,
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
+                        // Every connected network, coloured by this friend's
+                        // presence there: green online, yellow away, red offline,
+                        // grey unknown (no identity on that network → can't know).
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier.padding(top = 5.dp),
+                        ) {
+                            connectedNets.forEach { net ->
+                                val target = c.targets.firstOrNull { it.networkId == net.id }
+                                val color = when (target?.let { client.presenceOf(it) }) {
+                                    "online", "back" -> OnlineGreen
+                                    "away" -> NoticeAmber
+                                    "offline" -> AlertRed
+                                    else -> TextSecondary // no identity here, or unknown
+                                }
+                                Text(net.name, fontSize = 13.sp, color = color)
                             }
                         }
                     }
