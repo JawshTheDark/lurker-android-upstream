@@ -987,6 +987,18 @@ private fun ChannelControlPanel(
                     } else {
                         CHANNEL_MODE_FLAGS
                     }
+                // A long ISUPPORT mode list (solanum advertises ~18) would dominate
+                // the panel, so collapse to the active modes by default with a
+                // "+N more" expander. Active modes sort first so the current state
+                // reads at a glance.
+                var modesExpanded by remember(buffer.key) { mutableStateOf(false) }
+                val orderedModes = flagModes.sortedByDescending { it.first in modes }
+                val collapsible = orderedModes.size > 6
+                val shownModes = if (!collapsible || modesExpanded) {
+                    orderedModes
+                } else {
+                    orderedModes.filter { it.first in modes }.ifEmpty { orderedModes.take(4) }
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("CHANNEL MODES", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
@@ -997,12 +1009,24 @@ private fun ChannelControlPanel(
                         }
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        flagModes.forEach { (flag, label) ->
+                        shownModes.forEach { (flag, label) ->
                             val on = flag in modes
                             ModeChip(label, on) { client.setChannelMode(buffer, flag, !on) }
                         }
                         if ('k' in modes) ModeChip("Key set", true, onClick = null)
                         if ('l' in modes) ModeChip("Limited", true, onClick = null)
+                        if (collapsible) {
+                            Text(
+                                if (modesExpanded) "Show less" else "+${orderedModes.size - shownModes.size} more",
+                                color = AccentBlue,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { modesExpanded = !modesExpanded }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                            )
+                        }
                     }
                 }
 
