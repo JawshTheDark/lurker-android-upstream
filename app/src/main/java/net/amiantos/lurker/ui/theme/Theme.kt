@@ -103,6 +103,21 @@ object Ui {
      *  to that channel + message. Device-local, seeded from Prefs at launch. */
     val multichan = mutableStateListOf<String>()
 
+    /**
+     * Replace the mirrored-channel set from persisted prefs.
+     *
+     * Seeding MUST be idempotent. This object lives for the whole process, but
+     * MainActivity.onCreate runs again on every Activity recreation (rotation,
+     * theme change, any config change) — so a plain `addAll` stacked another copy
+     * of every key each time. The sibling maps above use `putAll`, which quietly
+     * overwrites, which is why only this list drifted: the buffer-list count
+     * climbed and each message rendered once per duplicate (d3fc0n).
+     */
+    fun seedMultichan(keys: Collection<String>) {
+        multichan.clear()
+        multichan.addAll(keys.distinct())
+    }
+
     /** Render the Multi-channel view as dense compact rows (true) or bubbles
      *  (false, default). Independent of the per-channel [compact] setting. */
     var multichanCompact by mutableStateOf(false)

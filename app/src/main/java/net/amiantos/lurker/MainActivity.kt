@@ -299,7 +299,7 @@ class MainActivity : FragmentActivity() {
         Ui.backgroundUri = prefs.backgroundUri
         Ui.backgroundDim = prefs.backgroundDim
         Ui.backgroundOverrides.putAll(prefs.backgroundOverrides)
-        Ui.multichan.addAll(prefs.multichanKeys)
+        Ui.seedMultichan(prefs.multichanKeys)
         Ui.multichanCompact = prefs.multichanCompact
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
@@ -1091,8 +1091,10 @@ private fun ChannelControlPanel(
                 }
                 // Mirror this channel into the Multi-channel firehose view.
                 PanelToggleRow("Add to Multi-channel", Ui.inMultichan(buffer.key)) { on ->
+                    // removeAll, not remove: strip every copy, so turning a channel
+                    // back off always sticks even if the list ever held duplicates.
                     if (on) { if (buffer.key !in Ui.multichan) Ui.multichan.add(buffer.key) }
-                    else Ui.multichan.remove(buffer.key)
+                    else Ui.multichan.removeAll { it == buffer.key }
                     Prefs(panelCtx).multichanKeys = Ui.multichan.toSet()
                 }
 
