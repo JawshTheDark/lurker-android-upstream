@@ -2995,7 +2995,7 @@ private fun MessageBubble(
     // Vertical rhythm scales with the chat font so small fonts don't read as
     // paradoxically airy (d3fc0n1's note): at the default baseSize 16 these
     // resolve to today's exact values (7 / 8 / 2), only the extremes shift.
-    val vPad = (baseSize * 0.44f).dp                       // inner bubble top+bottom
+    val vPad = (baseSize * 0.44f * Ui.densityScale).dp     // inner bubble top+bottom
     val groupTop = (baseSize * 0.5f * Ui.densityScale).dp  // gap above a new sender group
     val lineTop = (baseSize * 0.13f * Ui.densityScale).dp  // gap between lines in one group
     val shape = RoundedCornerShape(

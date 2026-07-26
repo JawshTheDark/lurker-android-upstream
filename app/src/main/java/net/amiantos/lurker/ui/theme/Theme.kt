@@ -86,10 +86,11 @@ object Ui {
         if (backgroundOverrides.containsKey(key)) backgroundOverrides[key]?.ifEmpty { null }
         else backgroundUri
 
-    /** Vertical-rhythm multiplier for [density], applied to message spacing. */
+    /** Vertical-rhythm multiplier for [density], applied to message spacing AND
+     *  each bubble's own vertical padding, so the three settings read clearly. */
     val densityScale: Float get() = when (density) {
-        "compact" -> 0.55f
-        "comfortable" -> 1.35f
+        "compact" -> 0.4f
+        "comfortable" -> 1.7f
         else -> 1f
     }
 
