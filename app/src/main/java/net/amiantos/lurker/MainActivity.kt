@@ -3682,13 +3682,18 @@ private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
     }
     // Through the mIRC renderer: topics regularly carry color/format codes,
     // which as plain text leak their digits ("09[Game Online]…").
+    // A topic can wrap to several lines — keep its OWN line spacing tight and set
+    // the block apart with padding above/below instead (freakyy85), rather than
+    // an airy line-height spreading its wrapped lines out.
+    val isTopic = msg.type == "topic"
     Text(
         mircAnnotated(msg.text, AccentBlue),
         fontSize = 12.sp,
         fontStyle = FontStyle.Italic,
+        lineHeight = 15.sp,
         color = TextSecondary,
         textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().padding(24.dp, 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = if (isTopic) 10.dp else 3.dp),
     )
 }
 
