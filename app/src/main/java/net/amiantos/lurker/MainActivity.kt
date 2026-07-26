@@ -5526,10 +5526,13 @@ private fun AddIgnoreDialog(onDismiss: () -> Unit, onAdd: (String, List<String>)
 @Composable
 private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
-    // Refresh each friend's presence on entry.
+    // Refresh presence for EVERY identity (not just the primary) on entry, so the
+    // per-network dots are accurate (d3fc0n).
     LaunchedEffect(client.contacts.size) {
-        client.contacts.forEach { c -> c.primary?.let { client.probePresence(it.networkId, it.nick) } }
+        client.contacts.forEach { c -> c.targets.forEach { client.probePresence(it.networkId, it.nick) } }
     }
+    var dialogContact by remember { mutableStateOf<Contact?>(null) }
+    var showDialog by remember { mutableStateOf(false) }
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = CanvasBlack,
@@ -5540,6 +5543,11 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                     TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
                 },
                 title = { Text("Friends", fontWeight = FontWeight.SemiBold) },
+                actions = {
+                    TextButton(onClick = { dialogContact = null; showDialog = true }) {
+                        Text("+ Add", color = AccentBlue, fontSize = 15.sp)
+                    }
+                },
             )
         },
     ) { padding ->
@@ -5548,7 +5556,7 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
             if (friends.isEmpty()) {
                 item {
                     Text(
-                        "No friends yet. Long-press a nick in a channel's member list and choose “Add as friend.”",
+                        "No friends yet. Tap “+ Add” above, or long-press a nick in a channel's member list → “Add as friend.”",
                         color = TextSecondary,
                         modifier = Modifier.padding(24.dp),
                     )
@@ -5556,34 +5564,147 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
             }
             items(friends.size) { i ->
                 val c = friends[i]
-                val t = c.primary
-                val dot = when (t?.let { client.presenceOf(it) }) {
-                    "online", "back" -> OnlineGreen
-                    "away" -> NoticeAmber
-                    else -> TextSecondary
-                }
+                var menuOpen by remember(c.id) { mutableStateOf(false) }
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = t != null) {
-                            t?.let { onOpenBuffer(client.focusTarget(it.networkId, it.nick)) }
+                        .clickable(enabled = c.primary != null) {
+                            c.primary?.let { onOpenBuffer(client.focusTarget(it.networkId, it.nick)) }
                         }
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(c.displayName, fontSize = 16.sp, color = TextPrimary)
-                        val sub = t?.let { "${it.nick} · ${client.networks[it.networkId]?.name ?: "net ${it.networkId}"}" } ?: "no target"
-                        Text(sub, fontSize = 13.sp, color = TextSecondary)
+                    Column(Modifier.weight(1f)) {
+                        Text(c.displayName, fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+                        // One line per network the friend is on, each with its own
+                        // online / idle / offline dot.
+                        c.targets.forEach { t ->
+                            val st = client.presenceOf(t)
+                            val dot = when (st) {
+                                "online", "back" -> OnlineGreen
+                                "away" -> NoticeAmber
+                                else -> TextSecondary
+                            }
+                            val label = when (st) {
+                                "online", "back" -> "online"
+                                "away" -> "idle"
+                                else -> "offline"
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 3.dp),
+                            ) {
+                                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+                                Text(
+                                    "${t.nick} · ${client.networks[t.networkId]?.name ?: "net ${t.networkId}"} · $label",
+                                    fontSize = 12.5.sp,
+                                    color = TextSecondary,
+                                    modifier = Modifier.padding(start = 8.dp),
+                                )
+                            }
+                        }
                     }
-                    TextButton(onClick = { client.deleteContact(c.id) }) {
-                        Text("Remove", color = AlertRed, fontSize = 13.sp)
+                    Box {
+                        TextButton(onClick = { menuOpen = true }) { Text("⋯", color = TextSecondary, fontSize = 20.sp) }
+                        AppDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Edit") },
+                                onClick = { menuOpen = false; dialogContact = c; showDialog = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Remove", color = AlertRed) },
+                                onClick = { menuOpen = false; client.deleteContact(c.id) },
+                            )
+                        }
                     }
                 }
                 HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 20.dp))
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+    if (showDialog) {
+        FriendEditDialog(
+            client = client,
+            existing = dialogContact,
+            onDismiss = { showDialog = false },
+            onSave = { name, notify, targets ->
+                client.setContact(
+                    dialogContact?.id, name, notify,
+                    targets.mapIndexed { idx, (net, nick) -> ContactTarget(net, nick, isPrimary = idx == 0) },
+                )
+                showDialog = false
+            },
+        )
+    }
+}
+
+/** Add or edit a friend: a display name, one-or-more (network, nick) identities
+ *  (the first is the primary DM target), and an online-notify toggle. */
+@Composable
+private fun FriendEditDialog(
+    client: LurkerClient,
+    existing: Contact?,
+    onDismiss: () -> Unit,
+    onSave: (String, Boolean, List<Pair<Int, String>>) -> Unit,
+) {
+    val nets = remember { client.networks.values.sortedBy { it.name } }
+    val defaultNet = nets.firstOrNull()?.id ?: 0
+    var name by remember(existing?.id) { mutableStateOf(existing?.displayName ?: "") }
+    var notify by remember(existing?.id) { mutableStateOf(existing?.notifyOnline ?: false) }
+    val targets = remember(existing?.id) {
+        mutableStateListOf<Pair<Int, String>>().apply {
+            addAll(existing?.targets?.map { it.networkId to it.nick } ?: listOf(defaultNet to ""))
+        }
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(color = SurfaceDark, shape = RoundedCornerShape(16.dp), border = BorderStroke(0.5.dp, GlassBorder)) {
+            Column(
+                Modifier.padding(16.dp).fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(if (existing == null) "Add friend" else "Edit friend", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Text("Identities (first is the primary DM)", color = TextSecondary, fontSize = 12.sp)
+                targets.forEachIndexed { i, (netId, nick) ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        var netMenu by remember { mutableStateOf(false) }
+                        Box {
+                            TextButton(onClick = { netMenu = true }) {
+                                Text(client.networks[netId]?.name ?: "net $netId", color = AccentBlue, fontSize = 13.sp)
+                            }
+                            AppDropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
+                                nets.forEach { n ->
+                                    DropdownMenuItem(
+                                        text = { Text(n.name) },
+                                        onClick = { targets[i] = n.id to targets[i].second; netMenu = false },
+                                    )
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            nick, { targets[i] = netId to it },
+                            placeholder = { Text("nick") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (targets.size > 1) {
+                            TextButton(onClick = { targets.removeAt(i) }) { Text("✕", color = AlertRed) }
+                        }
+                    }
+                }
+                TextButton(onClick = { targets.add(defaultNet to "") }) { Text("+ Add identity", color = AccentBlue, fontSize = 13.sp) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Notify when they come online", color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Switch(checked = notify, onCheckedChange = { notify = it })
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) }
+                    val valid = name.isNotBlank() && targets.any { it.second.isNotBlank() }
+                    TextButton(enabled = valid, onClick = {
+                        onSave(name.trim(), notify, targets.filter { it.second.isNotBlank() }.map { it.first to it.second.trim() })
+                    }) { Text("Save", color = if (valid) AccentBlue else TextSecondary, fontWeight = FontWeight.SemiBold) }
+                }
+            }
         }
     }
 }
