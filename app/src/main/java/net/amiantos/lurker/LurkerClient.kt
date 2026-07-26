@@ -2259,6 +2259,32 @@ open class LurkerClient {
         }
     }
 
+    // ---- Notification-action entry points (wrist / lockscreen replies) --------
+    // Resolve the live buffer if we hold it, else synthesize a transient one that
+    // just carries the (networkId, target) needed to act.
+
+    private fun bufferFor(networkId: Int, target: String): Buffer =
+        buffers.firstOrNull { it.key == "$networkId::$target" }
+            ?: Buffer(networkId, target, networks[networkId]?.name ?: "")
+
+    /** Send a reply typed into a notification (RemoteInput). No-op if offline. */
+    fun replyFromNotification(networkId: Int, target: String, text: String) {
+        if (text.isBlank()) return
+        val buffer = bufferFor(networkId, target)
+        execute(buffer, listOf(WireOp("send", text = text)))
+        markRead(buffer)
+    }
+
+    /** Mark a buffer read from a notification action. */
+    fun markReadFromNotification(networkId: Int, target: String) {
+        markRead(bufferFor(networkId, target))
+    }
+
+    /** Mute a buffer from a notification action. */
+    fun muteFromNotification(networkId: Int, target: String) {
+        setNotifyMuted(bufferFor(networkId, target), true)
+    }
+
     /** True when a synced ignore rule silences NOTIFICATIONS for this event — a
      *  channel-scope mute (mask null) or a sender-specific NONOTIFY/ALL rule. The
      *  local notifier must apply this itself; the server only honors it in push. */

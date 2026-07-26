@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 
 /**
  * Posts local notifications for notify-worthy messages that arrive while the app
@@ -30,6 +31,14 @@ object Notifier {
     const val EXTRA_NETWORK_ID = "lurker.networkId"
     const val EXTRA_TARGET = "lurker.target"
     const val EXTRA_MESSAGE_ID = "lurker.messageId"
+
+    // Notification-action intents (Reply carries RemoteInput text under KEY_REPLY).
+    // These drive both the phone's notification actions and — for free — the
+    // Reply/Mark-read/Mute affordances on a paired Wear OS watch.
+    const val ACTION_REPLY = "net.amiantos.lurker.action.REPLY"
+    const val ACTION_MARK_READ = "net.amiantos.lurker.action.MARK_READ"
+    const val ACTION_MUTE = "net.amiantos.lurker.action.MUTE"
+    const val KEY_REPLY = "lurker.replyText"
 
     fun ensureChannels(context: Context) {
         val mgr = context.getSystemService(NotificationManager::class.java) ?: return
@@ -71,6 +80,27 @@ object Notifier {
         // Strip mIRC bold/color/etc. control codes — the notification is plain text,
         // so raw codes would show as literal "3,01" garbage.
         val body = Mirc.strip(e.text)
+
+        // Reply / Mark-read / Mute actions — shown on the phone and, for free, as
+        // wrist actions on a paired Wear OS watch (Reply becomes voice/canned).
+        val idBase = "${e.networkId}::${e.target}".hashCode()
+        fun action(name: String, req: Int, mutable: Boolean): PendingIntent {
+            val i = Intent(context, NotificationActionReceiver::class.java)
+                .setAction(name)
+                .putExtra(EXTRA_NETWORK_ID, e.networkId ?: -1)
+                .putExtra(EXTRA_TARGET, e.target)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE)
+            return PendingIntent.getBroadcast(context, req, i, flags)
+        }
+        val replyInput = RemoteInput.Builder(KEY_REPLY)
+            .setLabel("Reply")
+            .setChoices(arrayOf("👍", "omw", "brb", "lol", "on it", "👋"))
+            .build()
+        val replyAction = NotificationCompat.Action.Builder(
+            R.drawable.ic_stat_notification, "Reply", action(ACTION_REPLY, idBase * 31 + 1, mutable = true),
+        ).addRemoteInput(replyInput).setAllowGeneratedReplies(true).build()
+
         val notif = NotificationCompat.Builder(context, if (e.isDm) CHANNEL_DMS else CHANNEL_MENTIONS)
             .setSmallIcon(R.drawable.ic_stat_notification)
             .setContentTitle(title)
@@ -78,6 +108,9 @@ object Notifier {
             .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(400)))
             .setAutoCancel(true)
             .setContentIntent(pi)
+            .addAction(replyAction)
+            .addAction(0, "Mark read", action(ACTION_MARK_READ, idBase * 31 + 2, mutable = false))
+            .addAction(0, "Mute", action(ACTION_MUTE, idBase * 31 + 3, mutable = false))
             .build()
         try {
             // One notification per buffer — a burst collapses onto the same id.

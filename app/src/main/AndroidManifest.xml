@@ -58,6 +58,12 @@
             android:name=".LurkerConnectionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Handles Reply / Mark-read / Mute actions on highlight & DM
+             notifications (also the wrist actions on a paired Wear OS watch). -->
+        <receiver
+            android:name=".NotificationActionReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>
