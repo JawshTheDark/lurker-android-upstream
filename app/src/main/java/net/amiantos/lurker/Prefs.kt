@@ -123,6 +123,16 @@ class Prefs(context: Context) {
         }.getOrDefault(emptyMap())
         set(value) = sp.edit { putString("backgroundOverrides", JSONObject(value as Map<*, *>).toString()) }
 
+    /** Buffer keys mirrored into the Multi-channel firehose view. */
+    var multichanKeys: Set<String>
+        get() = sp.getStringSet("multichanKeys", emptySet())?.toSet() ?: emptySet()
+        set(value) = sp.edit { putStringSet("multichanKeys", value) }
+
+    /** Multi-channel view uses compact rows (true) or bubbles (false = default). */
+    var multichanCompact: Boolean
+        get() = sp.getBoolean("multichanCompact", false)
+        set(value) = sp.edit { putBoolean("multichanCompact", value) }
+
     /** Buffer keys known to carry E2E — drives the sidebar lock before a buffer's
      *  history is loaded. (SharedPreferences returns an unmodifiable set; copy.) */
     var e2eBuffers: Set<String>

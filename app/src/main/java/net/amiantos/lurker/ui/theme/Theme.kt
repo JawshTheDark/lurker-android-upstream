@@ -8,6 +8,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -93,6 +94,20 @@ object Ui {
         "comfortable" -> 1.7f
         else -> 1f
     }
+
+    // ---- Multi-channel firehose ----------------------------------------------
+
+    /** Buffer keys whose messages are mirrored into the Multi-channel view — a
+     *  single pinned buffer that merges the timelines of every toggled channel,
+     *  each line tagged with its source (network · channel) and tappable to jump
+     *  to that channel + message. Device-local, seeded from Prefs at launch. */
+    val multichan = mutableStateListOf<String>()
+
+    /** Render the Multi-channel view as dense compact rows (true) or bubbles
+     *  (false, default). Independent of the per-channel [compact] setting. */
+    var multichanCompact by mutableStateOf(false)
+
+    fun inMultichan(key: String): Boolean = key in multichan
 
     /** The chat [FontFamily] for [fontFamily] (all built-in, no bundled fonts). */
     val chatFont: FontFamily get() = when (fontFamily) {

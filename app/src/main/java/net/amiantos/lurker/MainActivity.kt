@@ -246,6 +246,7 @@ private sealed interface Screen {
     data object Search : Screen
     data object Friends : Screen
     data object Ignores : Screen
+    data object Multichan : Screen
     data class ChannelList(val query: String? = null) : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
@@ -298,6 +299,8 @@ class MainActivity : FragmentActivity() {
         Ui.backgroundUri = prefs.backgroundUri
         Ui.backgroundDim = prefs.backgroundDim
         Ui.backgroundOverrides.putAll(prefs.backgroundOverrides)
+        Ui.multichan.addAll(prefs.multichanKeys)
+        Ui.multichanCompact = prefs.multichanCompact
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
         // as Lurker mode and start immediately; only a genuinely fresh install
@@ -446,6 +449,7 @@ class MainActivity : FragmentActivity() {
                             onFriends = { screen = Screen.Friends },
                             onIgnores = { screen = Screen.Ignores },
                             onBrowse = { screen = Screen.ChannelList() },
+                            onOpenMultichan = { screen = Screen.Multichan },
                             onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                             showList = true,
                             showRoster = true,
@@ -495,6 +499,7 @@ class MainActivity : FragmentActivity() {
                         onFriends = { go(Screen.Friends) },
                         onIgnores = { go(Screen.Ignores) },
                         onBrowse = { go(Screen.ChannelList()) },
+                        onOpenMultichan = { go(Screen.Multichan) },
                         onSignOut = { LurkerConnectionService.stop(this@MainActivity); client.signOut() },
                     )
                     is Screen.Chat -> ChatScreen(
@@ -544,6 +549,16 @@ class MainActivity : FragmentActivity() {
                         onBack = { back() },
                     )
                     Screen.Ignores -> IgnoresScreen(client) { back() }
+                    Screen.Multichan -> MultichanScreen(
+                        client = client,
+                        onBack = { back() },
+                        onOpenSource = { buffer, msgId ->
+                            val b = buffer.networkId?.let { client.focusTarget(it, buffer.target) }
+                                ?: buffer.also { client.open(it) }
+                            client.setActive(b)
+                            go(Screen.Chat(b, scrollToMsgId = msgId.takeIf { it > 0 }))
+                        },
+                    )
                     is Screen.ChannelList -> ChannelListScreen(
                         client = client,
                         initialQuery = (screen as Screen.ChannelList).query,
@@ -748,6 +763,7 @@ private fun TabletHome(
     onFriends: () -> Unit,
     onIgnores: () -> Unit,
     onBrowse: () -> Unit,
+    onOpenMultichan: () -> Unit = {},
     onSignOut: () -> Unit,
     // Three-pane keeps the buffer-list rail; two-pane drops it (the chat pairs
     // with the roster and Back returns to the full-screen list).
@@ -782,6 +798,7 @@ private fun TabletHome(
                     onFriends = onFriends,
                     onIgnores = onIgnores,
                     onBrowse = onBrowse,
+                    onOpenMultichan = onOpenMultichan,
                     onSignOut = onSignOut,
                 )
             }
@@ -1072,6 +1089,12 @@ private fun ChannelControlPanel(
                     Ui.compactOverrides[buffer.key] = on
                     Prefs(panelCtx).compactOverrides = Ui.compactOverrides.toMap()
                 }
+                // Mirror this channel into the Multi-channel firehose view.
+                PanelToggleRow("Add to Multi-channel", Ui.inMultichan(buffer.key)) { on ->
+                    if (on) { if (buffer.key !in Ui.multichan) Ui.multichan.add(buffer.key) }
+                    else Ui.multichan.remove(buffer.key)
+                    Prefs(panelCtx).multichanKeys = Ui.multichan.toSet()
+                }
 
                 // Per-channel background image (overrides the global one for THIS
                 // channel; "None here" hides it even if a global one is set).
@@ -1337,6 +1360,7 @@ private fun BufferListScreen(
     onFriends: () -> Unit,
     onIgnores: () -> Unit,
     onBrowse: () -> Unit,
+    onOpenMultichan: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -1369,6 +1393,7 @@ private fun BufferListScreen(
                 topPadding = with(density) { topBarHeightPx.toDp() },
                 hazeState = hazeState,
                 onOpen = onOpen,
+                onOpenMultichan = onOpenMultichan,
             )
         }
 
@@ -1433,6 +1458,7 @@ private fun BufferListBody(
     topPadding: androidx.compose.ui.unit.Dp,
     hazeState: HazeState,
     onOpen: (Buffer) -> Unit,
+    onOpenMultichan: () -> Unit = {},
 ) {
     LazyColumn(
         // Clip the scroll viewport above the nav bar (padding, not just
@@ -1454,6 +1480,39 @@ private fun BufferListBody(
                             .background(SurfaceDark, RoundedCornerShape(10.dp))
                             .padding(12.dp),
                     )
+                }
+            }
+            // The Multi-channel firehose: a single pinned entry above every network
+            // that merges the timelines of all toggled channels. Shown only once at
+            // least one channel opts in (from its control panel).
+            if (Ui.multichan.isNotEmpty()) {
+                item {
+                    Surface(
+                        color = SurfaceDark,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(0.5.dp, GlassBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 16.dp, top = 6.dp)
+                            .clickable(onClick = onOpenMultichan),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                        ) {
+                            Text("⊞", color = AccentBlue, fontSize = 20.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Multi-channel", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${Ui.multichan.size} channel${if (Ui.multichan.size == 1) "" else "s"} merged",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                )
+                            }
+                            Text("›", color = TextSecondary, fontSize = 20.sp)
+                        }
+                    }
                 }
             }
             items(rows.size) { index ->
@@ -3249,6 +3308,215 @@ private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)?
         // Vertical padding tracks the font (default 16 → 5.dp), matching bubbles.
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = (baseSize * 0.31f).dp),
     )
+}
+
+/**
+ * The Multi-channel firehose: one read-only view that merges the timelines of every
+ * channel toggled into it (from each channel's control panel). Each line is tagged
+ * with its source — network · channel — and tapping it jumps to that channel and
+ * flashes the exact message (reusing the search-result scroll seam). Renders as
+ * compact rows or bubbles per [Ui.multichanCompact], flipped from the top bar.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MultichanScreen(
+    client: LurkerClient,
+    onBack: () -> Unit,
+    onOpenSource: (Buffer, Long) -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    val hazeState = remember { HazeState() }
+    val density = LocalDensity.current
+    val context = LocalContext.current
+    var topBarHeightPx by remember { mutableStateOf(0) }
+    val uriHandler = LocalUriHandler.current
+    val openLink: (String) -> Unit = { url ->
+        val u = if (url.startsWith("http", ignoreCase = true)) url else "https://$url"
+        runCatching { uriHandler.openUri(u) }
+    }
+    val baseSize = (client.settingInt("look.font.size.mobile", 14) + 2 + Ui.chatTextScale).coerceIn(11, 30)
+
+    // Merge every included buffer's messages, tagged with source, oldest→newest.
+    // Read the snapshot state directly (no remember) so freshly-arrived messages in
+    // any source channel recompose the feed. IDs are per-network and not comparable
+    // across networks, so we sort by server-time (ISO-8601 sorts chronologically);
+    // lines without a time (rare local notices) sort to the top.
+    val feed = buildList {
+        Ui.multichan.forEach { key ->
+            val buf = client.buffers.find { it.key == key } ?: return@forEach
+            val msgs = client.messagesByBuffer[key] ?: return@forEach
+            msgs.asReversed().take(250).forEach { m ->
+                if (!m.system && m.text.isNotBlank()) add(buf to m)
+            }
+        }
+    }.sortedBy { it.second.time ?: "" }.takeLast(500)
+
+    val listState = rememberLazyListState()
+    var pinnedOnce by remember { mutableStateOf(false) }
+    // Start pinned to the newest line; thereafter follow the tail while the user is
+    // already near the bottom, but don't yank them down if they've scrolled up.
+    LaunchedEffect(feed.size) {
+        if (feed.isEmpty()) return@LaunchedEffect
+        val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= feed.size - 3 } ?: true
+        if (!pinnedOnce || (atBottom && !listState.isScrollInProgress)) {
+            listState.scrollToItem(feed.lastIndex)
+            pinnedOnce = true
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(CanvasBlack)) {
+        AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
+        if (feed.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (Ui.multichan.isEmpty()) "No channels added yet.\nToggle \"Add to Multi-channel\" in a channel's control panel."
+                    else "No messages yet in the merged channels.",
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().navigationBarsPadding().hazeSource(hazeState, zIndex = 1f),
+                contentPadding = PaddingValues(top = with(density) { topBarHeightPx.toDp() } + 4.dp, bottom = 8.dp),
+            ) {
+                items(feed.size) { i ->
+                    val (buf, m) = feed[i]
+                    val label = "${buf.networkName} · ${buf.displayName}"
+                    if (Ui.multichanCompact) {
+                        MultichanCompactRow(m, label, baseSize, openLink) { onOpenSource(buf, m.id) }
+                    } else {
+                        MultichanBubbleRow(m, label, baseSize, openLink) { onOpenSource(buf, m.id) }
+                    }
+                }
+            }
+        }
+
+        // Frosted top bar: back, title, and the compact/bubble mode flip.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .onSizeChanged { topBarHeightPx = it.height }
+                .hazeEffect(hazeState, style = glassStyle()),
+        ) {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
+                },
+                title = { Text("Multi-channel", color = TextPrimary, fontWeight = FontWeight.SemiBold) },
+                actions = {
+                    TextButton(onClick = {
+                        Ui.multichanCompact = !Ui.multichanCompact
+                        Prefs(context).multichanCompact = Ui.multichanCompact
+                    }) {
+                        Text(if (Ui.multichanCompact) "Bubbles" else "Compact", color = AccentBlue, fontSize = 14.sp)
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** A merged-view bubble: source header (network · channel · nick, tappable) over the
+ *  message body. Always received-style (left, no self colouring) — it's a reader. */
+@Composable
+private fun MultichanBubbleRow(
+    msg: Msg,
+    sourceLabel: String,
+    baseSize: Int,
+    onLink: ((String) -> Unit)?,
+    onOpen: () -> Unit,
+) {
+    val vPad = (baseSize * 0.44f).dp
+    Column(
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 64.dp, top = (baseSize * 0.5f).dp, bottom = 1.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(onClick = onOpen)
+                .padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        ) {
+            Text(sourceLabel, color = AccentBlue, fontSize = (baseSize - 4).sp, fontWeight = FontWeight.SemiBold)
+            Text("  ·  ", color = TextSecondary, fontSize = (baseSize - 4).sp)
+            Text(msg.nick, color = nickColor(msg.nick), fontSize = (baseSize - 3).sp, fontWeight = FontWeight.SemiBold)
+        }
+        val shape = RoundedCornerShape(18.dp)
+        Box(
+            Modifier
+                .clip(shape)
+                .background(if (msg.matched) HighlightGold else SurfaceRaised, shape)
+                .padding(horizontal = 13.dp, vertical = vPad),
+        ) {
+            Text(
+                mircAnnotated(msg.text, AccentBlue, onLink),
+                color = if (msg.type == "notice") NoticeAmber else TextPrimary,
+                fontSize = baseSize.sp,
+                fontFamily = Ui.chatFont,
+            )
+        }
+        if (Ui.inlineMedia && onLink != null) {
+            val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
+            embeds.forEach { (url, kind) ->
+                when (kind) {
+                    MediaKind.AUDIO -> InlineAudioPlayer(url)
+                    MediaKind.VIDEO -> InlineVideoPlayer(url)
+                    MediaKind.IMAGE -> MediaEmbed(url, onOpen = { onLink(url) }, onLoaded = {})
+                }
+            }
+        }
+    }
+}
+
+/** A merged-view compact row: "time  network · channel · nick  message". The whole
+ *  row is tappable to jump to that channel + message. */
+@Composable
+private fun MultichanCompactRow(
+    msg: Msg,
+    sourceLabel: String,
+    baseSize: Int,
+    onLink: ((String) -> Unit)?,
+    onOpen: () -> Unit,
+) {
+    val time = formatTime(msg.time)
+    val line = buildAnnotatedString {
+        if (time != null) {
+            withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
+        }
+        withStyle(SpanStyle(color = AccentBlue, fontWeight = FontWeight.SemiBold)) { append(sourceLabel) }
+        withStyle(SpanStyle(color = TextSecondary)) { append("  ·  ") }
+        withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
+        append("  ")
+        val body = mircAnnotated(msg.text, AccentBlue, onLink)
+        when (msg.type) {
+            "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
+            "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }
+            else -> append(body)
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(if (msg.matched) HighlightGold.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 12.dp, vertical = 1.5.dp),
+    ) {
+        Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary, fontFamily = Ui.chatFont)
+        if (Ui.inlineMedia && onLink != null) {
+            val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
+            embeds.forEach { (url, kind) ->
+                when (kind) {
+                    MediaKind.AUDIO -> InlineAudioPlayer(url)
+                    MediaKind.VIDEO -> InlineVideoPlayer(url)
+                    MediaKind.IMAGE -> MediaEmbed(url, onOpen = { onLink(url) }, onLoaded = {})
+                }
+            }
+        }
+    }
 }
 
 private val CHANNEL_RE = Regex("""#[^\s,]+""")
