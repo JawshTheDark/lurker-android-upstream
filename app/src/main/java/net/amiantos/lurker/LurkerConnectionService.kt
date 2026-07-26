@@ -26,10 +26,15 @@ class LurkerConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            DebugLog.i("service", "stop requested by user")
             Prefs(this).backgroundConnect = false
             stopSelf()
             return START_NOT_STICKY
         }
+        // A restart (flags carry START_FLAG_*) after the OS killed us is the
+        // fingerprint of "app was repeatedly terminated" — record it.
+        val restarted = flags and (START_FLAG_REDELIVERY or START_FLAG_RETRY) != 0
+        DebugLog.i("service", "foreground start (startId=$startId${if (restarted) ", OS-restarted after kill" else ""})")
         Notifier.ensureChannels(this)
         val open = android.app.PendingIntent.getActivity(
             this, 0,
@@ -61,6 +66,16 @@ class LurkerConnectionService : Service() {
         // If the OS kills us for memory, come back when it can — the app being
         // installed with backgroundConnect on means the user wants us alive.
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        DebugLog.w("service", "destroyed (OS reclaim or stop)")
+        super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        DebugLog.w("service", "task removed (app swiped from recents)")
+        super.onTaskRemoved(rootIntent)
     }
 
     companion object {

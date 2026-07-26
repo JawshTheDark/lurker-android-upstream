@@ -583,6 +583,7 @@ open class LurkerClient {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (webSocket !== ws) return // superseded socket — ignore
                 android.util.Log.i("LurkerWS", "open")
+                DebugLog.i("ws", "connected")
                 lastFrameAt = System.currentTimeMillis()
                 webSocket.send(presenceFrame(true))
                 post {
@@ -610,6 +611,7 @@ open class LurkerClient {
                 // false and double-booked reconnects (the reopen "flutter").
                 if (webSocket !== ws) return
                 android.util.Log.w("LurkerWS", "failure http=${response?.code} ${t.javaClass.simpleName}: ${t.message}")
+                DebugLog.e("ws", "failure http=${response?.code} ${t.javaClass.simpleName}: ${t.message}")
                 val code = response?.code
                 post {
                     connected = false
@@ -632,6 +634,7 @@ open class LurkerClient {
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (webSocket !== ws) return // superseded socket — ignore
                 android.util.Log.w("LurkerWS", "closed code=$code reason=$reason")
+                DebugLog.w("ws", "closed code=$code reason=${reason.ifEmpty { "-" }}${if (intentionalClose) " (intentional)" else ""}")
                 post {
                     connected = false
                     connecting = false
@@ -854,8 +857,12 @@ open class LurkerClient {
                 if (shouldNotify(frame.optBoolean("notify", false), buffer.key == activeKey, msg.self, msg.system, msg.id > 0, appForeground) &&
                     !isMutedForNotify(buffer.networkId, buffer.target, frame.optString("userhost"), msg.nick)
                 ) {
+                    val (nNet, nTarget, sameBuffer) = notifyTargetFor(buffer)
                     notificationSink?.invoke(
-                        NotifiableEvent(buffer.networkId, buffer.target, msg.nick, msg.text, frame.optBoolean("dm"), msg.id),
+                        // Drop the message id when we retarget to a relay-linked
+                        // pinned channel on another network — that copy has its own
+                        // ids, so a scroll-to would miss; just open the buffer.
+                        NotifiableEvent(nNet, nTarget, msg.nick, msg.text, frame.optBoolean("dm"), if (sameBuffer) msg.id else 0),
                     )
                 }
             }
@@ -2174,6 +2181,19 @@ open class LurkerClient {
     fun isPinned(buffer: Buffer): Boolean =
         buffer.networkId?.let { pins[it]?.any { t -> t.equals(buffer.target, true) } } == true
 
+    /** Which buffer a highlight notification for [buffer] should open, plus whether
+     *  that's the same buffer the message arrived on. When a relayed copy of a
+     *  channel highlights you on a network where you HAVEN'T pinned it, but you
+     *  HAVE pinned the same-named channel on another network (your favourited
+     *  "home"), prefer that — so tapping the notification lands in the original,
+     *  not the relay mirror (freakyy85). Same-name match only; differently-named
+     *  relays can't be linked without explicit metadata. Falls back to [buffer]. */
+    fun notifyTargetFor(buffer: Buffer): Triple<Int?, String, Boolean> {
+        val net = buffer.networkId ?: return Triple(buffer.networkId, buffer.target, true)
+        val other = relayNotifyNetwork(net, buffer.target, buffer.isChannel, pins)
+        return if (other != null) Triple(other, buffer.target, false) else Triple(net, buffer.target, true)
+    }
+
     fun togglePin(buffer: Buffer) {
         val networkId = buffer.networkId ?: return
         val type = if (isPinned(buffer)) "unpin-buffer" else "pin-buffer"
@@ -2523,6 +2543,28 @@ fun isHostedLurker(raw: String): Boolean {
  * server flagged `notify` (its union of highlight / DM / notify-always) that
  * isn't in the currently-open buffer.
  */
+/**
+ * Pure relay-notification retarget. When a channel highlights you on a network
+ * where you HAVEN'T pinned it, but you HAVE pinned the same-named channel on a
+ * DIFFERENT network (your favourited "home" of a relayed pair), return that other
+ * network so the notification opens the original — else null to keep the source.
+ * Same-name match only; no Android/state deps so it's unit-testable.
+ */
+internal fun relayNotifyNetwork(
+    net: Int,
+    target: String,
+    isChannel: Boolean,
+    pinsByNet: Map<Int, List<String>>,
+): Int? {
+    if (!isChannel) return null
+    if (pinsByNet[net]?.any { it.equals(target, true) } == true) return null // already pinned here
+    for ((pinnedNet, targets) in pinsByNet) {
+        if (pinnedNet == net) continue
+        if (targets.any { it.equals(target, true) }) return pinnedNet
+    }
+    return null
+}
+
 internal fun shouldNotify(
     notify: Boolean,
     isActiveBuffer: Boolean,

@@ -290,6 +290,7 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
          *  bad host or wrong password) to one line instead of spamming the buffer. */
         private fun surfaceError(text: String) {
             status = text
+            DebugLog.e("irc", "${netName()}: $text")
             if (lastSurfacedError[networkId] == text) return
             lastSurfacedError[networkId] = text
             val server = ensureBuffer(networkId, ":server:$networkId")
@@ -417,7 +418,8 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
         if (!ignore.suppressNotify &&
             shouldNotify(true, b.key == activeKey, self, msg.system, msg.id > 0, appForeground)
         ) {
-            notificationSink?.invoke(NotifiableEvent(networkId, target, nick, text, dm, msg.id))
+            val (nNet, nTarget, sameBuffer) = notifyTargetFor(b)
+            notificationSink?.invoke(NotifiableEvent(nNet, nTarget, nick, text, dm, if (sameBuffer) msg.id else 0))
         }
     }
 

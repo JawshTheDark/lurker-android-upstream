@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -143,6 +144,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
@@ -3839,6 +3841,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { BiometricLockCard(prefs) }
                 item { E2eBiometricLockCard(prefs) }
                 item { BackgroundConnectCard(prefs) }
+                item { DiagnosticsCard() }
                 item { ConnectionModeCard(prefs) }
                 // FORK-ONLY: only shown when the connected server supports it.
                 if (client.serverExtended) item { AliasesCard(client) }
@@ -4196,6 +4199,87 @@ private fun BackgroundConnectCard(prefs: Prefs) {
         on = it
         prefs.backgroundConnect = it
         if (it) LurkerConnectionService.start(context) else LurkerConnectionService.stop(context)
+    }
+}
+
+/** Opens the in-app diagnostics log — recent connection/error events the user can
+ *  copy or share when reporting a bug (drove by "app was repeatedly terminated"
+ *  reports with no detail). */
+@Composable
+private fun DiagnosticsCard() {
+    var show by remember { mutableStateOf(false) }
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp).clickable { show = true },
+    ) {
+        Column(Modifier.padding(16.dp, 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Diagnostics", fontSize = 17.sp)
+            Text(
+                "View the app's recent connection & error log — handy for bug reports.",
+                color = TextSecondary, fontSize = 13.sp,
+            )
+        }
+    }
+    if (show) DiagnosticsDialog(onDismiss = { show = false })
+}
+
+@Composable
+private fun DiagnosticsDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val entries = DebugLog.entries
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            color = CanvasBlack,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(0.5.dp, GlassBorder),
+            modifier = Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.85f),
+        ) {
+            Column(Modifier.fillMaxSize().padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Diagnostics", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text("Close", color = AccentBlue) }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(DebugLog.dump())) }) {
+                        Text("Copy", fontSize = 13.sp, color = AccentBlue)
+                    }
+                    TextButton(onClick = {
+                        val send = Intent(Intent.ACTION_SEND)
+                            .setType("text/plain")
+                            .putExtra(Intent.EXTRA_TEXT, DebugLog.dump())
+                        context.startActivity(Intent.createChooser(send, "Share diagnostics"))
+                    }) { Text("Share", fontSize = 13.sp, color = AccentBlue) }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { DebugLog.clear() }) { Text("Clear", fontSize = 13.sp, color = AlertRed) }
+                }
+                HorizontalDivider(color = GlassBorder)
+                if (entries.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No diagnostics yet.", color = TextSecondary, fontSize = 13.sp)
+                    }
+                } else {
+                    LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
+                        items(entries.size) { i ->
+                            val e = entries[entries.lastIndex - i] // newest first
+                            Text(
+                                DebugLog.render(e),
+                                color = when (e.level) {
+                                    DebugLog.Level.ERROR -> AlertRed
+                                    DebugLog.Level.WARN -> Color(0xFFFFD60A)
+                                    else -> TextSecondary
+                                },
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

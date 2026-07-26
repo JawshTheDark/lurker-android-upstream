@@ -35,6 +35,12 @@ class LurkerApp : Application(), ImageLoaderFactory {
     var unlocked = false
     var backgroundedAt = 0L
 
+    override fun onCreate() {
+        super.onCreate()
+        // Diagnostics + crash trap, first thing so it captures early failures.
+        DebugLog.init(this)
+    }
+
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .components { add(ImageDecoderDecoder.Factory()) } // animated GIF/WebP
