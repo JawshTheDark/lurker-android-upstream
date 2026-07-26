@@ -146,6 +146,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -284,6 +285,8 @@ class MainActivity : FragmentActivity() {
         Ui.chatTextScale = prefs.chatTextScale
         Ui.clock24h = prefs.clock24h
         Ui.highlightColor = prefs.highlightColor
+        Ui.compact = prefs.compactMessages
+        Ui.compactOverrides.putAll(prefs.compactOverrides)
         // Don't start a backend until a mode is settled. Existing users have a
         // saved Lurker session (clientMode still null on first update) — treat them
         // as Lurker mode and start immediately; only a genuinely fresh install
@@ -892,10 +895,17 @@ private fun ChannelControlPanel(
                 Modifier
                     .padding(top = topDp + 6.dp, start = 10.dp, end = 10.dp)
                     .fillMaxWidth()
+                    // Cap to the space between the top bar and the composer, and
+                    // scroll internally — so the panel never runs off the bottom or
+                    // hides its lower controls under the composer on shorter phones
+                    // (or when a network advertises a long mode list). ~104dp clears
+                    // a typical composer + nav inset.
+                    .heightIn(max = (LocalConfiguration.current.screenHeightDp.dp - topDp - 104.dp).coerceAtLeast(200.dp))
                     .clip(RoundedCornerShape(20.dp))
                     .hazeEffect(hazeState, style = glassStyle())
                     .background(SurfaceDark, RoundedCornerShape(20.dp))
                     .border(0.5.dp, GlassBorder, RoundedCornerShape(18.dp))
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
@@ -956,11 +966,13 @@ private fun ChannelControlPanel(
                         Text("No topic set.", color = TextSecondary, fontSize = 13.sp)
                     } else {
                         Text(
+                            // No inner scroll — the whole panel scrolls now, and a
+                            // nested same-direction scroll would fight it. A long
+                            // topic just extends and the panel handles the overflow.
                             mircAnnotated(topic, AccentBlue, onOpenLink),
                             color = TextPrimary,
                             fontSize = 12.5.sp,
                             lineHeight = 16.sp,
-                            modifier = Modifier.heightIn(max = 88.dp).verticalScroll(rememberScrollState()),
                         )
                     }
                 }
@@ -1002,6 +1014,12 @@ private fun ChannelControlPanel(
                 }
                 PanelToggleRow("Mute notifications", client.isNotifyMuted(buffer)) {
                     client.setNotifyMuted(buffer, it)
+                }
+                // Per-channel compact layout (overrides the global default).
+                val panelCtx = LocalContext.current
+                PanelToggleRow("Compact messages", Ui.compactFor(buffer.key)) { on ->
+                    Ui.compactOverrides[buffer.key] = on
+                    Prefs(panelCtx).compactOverrides = Ui.compactOverrides.toMap()
                 }
 
                 TextButton(
@@ -2037,8 +2055,16 @@ private fun ChatScreen(
                 }
             }
             items(rows.size) { i ->
+                val compact = Ui.compactFor(buffer.key)
                 when (val row = rows[i]) {
-                    is ChatRow.Bubble -> MessageBubble(
+                    is ChatRow.Bubble -> if (compact) {
+                        CompactMessageRow(
+                            row.msg, baseSize, openLink,
+                            onAction = { actionMsg = it },
+                            onMediaLoaded = { mediaTick++ },
+                            flash = row.msg.id == flashMsgId,
+                        )
+                    } else MessageBubble(
                         row.msg, row.first, row.last, baseSize, openLink,
                         onMediaLoaded = { mediaTick++ },
                         onAction = { actionMsg = it },
@@ -2053,7 +2079,7 @@ private fun ChatScreen(
                         },
                         onRevealEnd = { revealScope.launch { revealAnim.animateTo(0f) } },
                     )
-                    is ChatRow.Action -> ActionLine(row.msg, baseSize, openLink)
+                    is ChatRow.Action -> if (Ui.compact) CompactActionRow(row.msg, baseSize, openLink) else ActionLine(row.msg, baseSize, openLink)
                     is ChatRow.SystemLine -> SystemLine(
                         row.msg,
                         onJoin = if (buffer.networkId != null) {
@@ -2276,29 +2302,47 @@ private fun ChatScreen(
             }
         }
 
-        // Jump back to the tail after reading history.
+        // Jump back to the tail after reading history. A compact circular button
+        // (not a wide pill) with a count badge, so it covers as little chat as
+        // possible — matters most in the dense compact layout (amiantos's note).
         if (!atBottom && rows.isNotEmpty()) {
             val scope = rememberCoroutineScope()
-            Text(
-                if (missed > 0) "↓ $missed new" else "↓ Latest",
-                color = if (missed > 0) AccentBlue else TextPrimary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
+            Box(
+                Modifier
                     .align(Alignment.BottomEnd)
                     .padding(
-                        end = 16.dp,
+                        end = 14.dp,
                         bottom = with(density) { bottomBarHeightPx.toDp() } + 14.dp,
+                    ),
+            ) {
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .background(SurfaceRaised, CircleShape)
+                        .border(0.5.dp, GlassBorder, CircleShape)
+                        .clickable {
+                            scope.launch {
+                                listState.scrollToItem(maxOf(0, listState.layoutInfo.totalItemsCount - 1))
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("↓", color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                }
+                if (missed > 0) {
+                    Text(
+                        if (missed > 99) "99+" else "$missed",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = 5.dp, y = (-5).dp)
+                            .background(AccentBlue, CircleShape)
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
                     )
-                    .background(SurfaceRaised, RoundedCornerShape(16.dp))
-                    .border(0.5.dp, GlassBorder, RoundedCornerShape(16.dp))
-                    .clickable {
-                        scope.launch {
-                            listState.scrollToItem(maxOf(0, listState.layoutInfo.totalItemsCount - 1))
-                        }
-                    }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            )
+                }
+            }
         }
     }
 
@@ -2990,6 +3034,79 @@ private fun MessageBubble(
             // dense (d3fc0n1) while per-message times stay one gesture away.
         }
     }
+}
+
+/** Dense IRC-style single message row: "time nick  message", no bubble. The
+ *  whole timeline reads as continuous text (freakyy85's compact mode). Preserves
+ *  mIRC colours/links, highlights (subtle row tint), and inline media. */
+@Composable
+private fun CompactMessageRow(
+    msg: Msg,
+    baseSize: Int,
+    onLink: ((String) -> Unit)? = null,
+    onAction: ((Msg) -> Unit)? = null,
+    onMediaLoaded: () -> Unit = {},
+    flash: Boolean = false,
+) {
+    val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
+    val goldHighlight = !msg.self && paintedBg == null && (msg.matched || flash)
+    val highlightBg = if (Ui.highlightColor != 0) Color(Ui.highlightColor) else HighlightGold
+    val time = formatTime(msg.time)
+    val line = buildAnnotatedString {
+        if (time != null) {
+            withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
+        }
+        withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
+        append("  ")
+        val body = mircAnnotated(msg.text, AccentBlue, onLink)
+        when (msg.type) {
+            "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
+            "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }
+            else -> append(body)
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(if (goldHighlight) highlightBg.copy(alpha = 0.16f) else Color.Transparent)
+            .then(if (onAction != null) Modifier.combinedClickable(onClick = {}, onLongClick = { onAction(msg) }) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 1.5.dp),
+    ) {
+        Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary)
+        if (Ui.inlineMedia && onLink != null) {
+            val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
+            embeds.forEach { (url, kind) ->
+                when (kind) {
+                    MediaKind.AUDIO -> InlineAudioPlayer(url)
+                    MediaKind.VIDEO -> InlineVideoPlayer(url)
+                    MediaKind.IMAGE -> MediaEmbed(url, onOpen = { onLink(url) }, onLoaded = onMediaLoaded)
+                }
+            }
+        }
+    }
+}
+
+/** Compact-mode CTCP ACTION ("* nick does thing"). */
+@Composable
+private fun CompactActionRow(msg: Msg, baseSize: Int, onLink: ((String) -> Unit)? = null) {
+    val time = formatTime(msg.time)
+    val line = buildAnnotatedString {
+        if (time != null) {
+            withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
+        }
+        withStyle(SpanStyle(color = NoticeAmber, fontStyle = FontStyle.Italic)) {
+            append("* ")
+            withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
+            append(" ")
+            append(mircAnnotated(msg.text, AccentBlue, onLink))
+        }
+    }
+    Text(
+        line,
+        fontSize = baseSize.sp,
+        lineHeight = (baseSize + 3).sp,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.5.dp),
+    )
 }
 
 @Composable
@@ -3836,6 +3953,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
                 item { ClockFormatCard(prefs) }
+                item { CompactMessagesCard(prefs) }
                 item { HighlightColorCard(prefs) }
                 item { ChatTextSizeCard(prefs) }
                 item { BiometricLockCard(prefs) }
@@ -4030,6 +4148,35 @@ private fun ClockFormatCard(prefs: Prefs) {
             Switch(
                 checked = Ui.clock24h,
                 onCheckedChange = { Ui.clock24h = it; prefs.clock24h = it },
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactMessagesCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Compact messages", fontSize = 17.sp)
+                Text(
+                    "Default for all channels — dense IRC-style rows (time · nick · message) instead of bubbles. Override per channel in its control panel.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = Ui.compact,
+                onCheckedChange = { Ui.compact = it; prefs.compactMessages = it },
             )
         }
     }

@@ -8,6 +8,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
@@ -38,6 +39,18 @@ object Ui {
 
     /** Highlight-bubble colour override (ARGB); 0 = theme default gold. */
     var highlightColor by mutableStateOf(0)
+
+    /** Compact message layout: dense IRC-style "time nick message" rows instead of
+     *  the default iMessage bubbles (freakyy85). This is the DEFAULT; individual
+     *  channels can override it below. */
+    var compact by mutableStateOf(false)
+
+    /** Per-buffer compact overrides (buffer.key -> compact?), toggled from each
+     *  channel's control panel. Absent = fall back to the [compact] default. */
+    val compactOverrides = mutableStateMapOf<String, Boolean>()
+
+    /** Effective compact setting for a buffer: its override, else the default. */
+    fun compactFor(key: String): Boolean = compactOverrides[key] ?: compact
 }
 
 private data class Palette(

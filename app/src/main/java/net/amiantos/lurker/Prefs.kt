@@ -5,6 +5,7 @@ package net.amiantos.lurker
 
 import android.content.Context
 import androidx.core.content.edit
+import org.json.JSONObject
 
 /**
  * Small persistent store for the session. The prototype held the token in
@@ -60,6 +61,21 @@ class Prefs(context: Context) {
     var clock24h: Boolean
         get() = sp.getBoolean("clock24h", false)
         set(value) = sp.edit { putBoolean("clock24h", value) }
+
+    /** Dense IRC-style message rows instead of iMessage bubbles — the DEFAULT for
+     *  channels without a per-channel override (default off). */
+    var compactMessages: Boolean
+        get() = sp.getBoolean("compactMessages", false)
+        set(value) = sp.edit { putBoolean("compactMessages", value) }
+
+    /** Per-buffer compact overrides (buffer.key -> Boolean), JSON-encoded. */
+    var compactOverrides: Map<String, Boolean>
+        get() = runCatching {
+            val s = sp.getString("compactOverrides", null) ?: return emptyMap()
+            val o = JSONObject(s)
+            o.keys().asSequence().associateWith { o.getBoolean(it) }
+        }.getOrDefault(emptyMap())
+        set(value) = sp.edit { putString("compactOverrides", JSONObject(value as Map<*, *>).toString()) }
 
     /** Highlight-message bubble colour (ARGB int). 0 = theme default (gold). */
     var highlightColor: Int
