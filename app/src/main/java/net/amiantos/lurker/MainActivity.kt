@@ -2414,7 +2414,23 @@ private fun ChatScreen(
                                 LockGlyph(color = OnlineGreen, size = 13.dp)
                                 Spacer(Modifier.width(4.dp))
                             }
-                            Text(buffer.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                buffer.displayName,
+                                color = TextPrimary,
+                                // Capped: the title slot is only ~168dp between the
+                                // back arrow, member count and gear, so at full scale
+                                // barely three characters survive the ellipsis.
+                                fontSize = cappedSp(15f, 1.3f),
+                                fontWeight = FontWeight.SemiBold,
+                                // The pill is centred between the back arrow, member
+                                // count and gear, so at a large font scale a long name
+                                // gets squeezed and would break mid-word
+                                // ("#compu / tertech"), doubling the bar's height.
+                                // Truncate instead; the full name is in the panel.
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
                             Spacer(Modifier.width(5.dp))
                             Text("⌄", color = TextSecondary, fontSize = 13.sp)
                         }
@@ -2718,7 +2734,8 @@ private fun E2eSheet(
                 fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 10.dp),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Four buttons need ~390dp at 2x in a 328dp column — wrap them.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = { run("status") }) { Text("Status", fontSize = 13.sp) }
                 TextButton(onClick = { run("list") }) { Text("Peers", fontSize = 13.sp) }
                 TextButton(onClick = { run("fingerprint") }) { Text("My key", fontSize = 13.sp) }
@@ -2836,10 +2853,14 @@ private fun RosterList(
             ) {
                 Text(
                     m.prefix.ifEmpty { " " },
+                    // widthIn, not width: a two-symbol prefix ("@+") in a hard 20dp
+                    // box wraps one symbol per line at a large font scale.
+                    maxLines = 1,
+                    softWrap = false,
                     color = if (m.canModerate) NoticeAmber else OnlineGreen,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.width(20.dp),
+                    modifier = Modifier.widthIn(min = 20.dp),
                 )
                 Text(
                     m.nick,
@@ -2956,10 +2977,21 @@ private fun MemberActions(
                 color = nickColor(nick),
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 17.sp,
+                maxLines = 1,
+                softWrap = false,
             )
             member.host?.let {
                 Spacer(Modifier.width(8.dp))
-                Text(it, color = TextSecondary, fontSize = 12.sp)
+                // Hostmasks are long; at a large font scale the nick takes the row
+                // and the host would wrap a character at a time. Truncate it.
+                Text(
+                    it,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
             }
         }
         client.nickNote(networkId, nick)?.let { note ->
@@ -3639,9 +3671,28 @@ private fun MultichanBubbleRow(
                 .clickable(onClick = onOpen)
                 .padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         ) {
-            Text(sourceLabel, color = AccentBlue, fontSize = (baseSize - 4).sp, fontWeight = FontWeight.SemiBold)
-            Text("  ·  ", color = TextSecondary, fontSize = (baseSize - 4).sp)
-            Text(msg.nick, color = nickColor(msg.nick), fontSize = (baseSize - 3).sp, fontWeight = FontWeight.SemiBold)
+            // "network · channel" is long, and the bubble column is inset 76dp, so
+            // a large font scale squeezes the nick to nothing and it wraps a letter
+            // per line — on EVERY row. Truncate the source, keep the nick whole:
+            // the nick is the part you're scanning for.
+            Text(
+                sourceLabel,
+                color = AccentBlue,
+                fontSize = (baseSize - 4).sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Text("  ·  ", color = TextSecondary, fontSize = (baseSize - 4).sp, maxLines = 1, softWrap = false)
+            Text(
+                msg.nick,
+                color = nickColor(msg.nick),
+                fontSize = (baseSize - 3).sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+            )
         }
         val shape = RoundedCornerShape(18.dp)
         Box(
@@ -4949,7 +5000,7 @@ private fun ChatBackgroundCard(prefs: Prefs) {
     AppearanceCard {
         Text("Chat background", fontSize = 17.sp)
         Text("Use a photo from your device behind your chats.", color = TextSecondary, fontSize = 12.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
                 Text(if (Ui.backgroundUri == null) "Choose image" else "Change image", color = AccentBlue)
             }
@@ -5461,7 +5512,17 @@ private fun NetworksScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             ConnectionDot(connected)
                             Spacer(Modifier.width(8.dp))
-                            Text(cfg.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            Text(
+                                cfg.name,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                // Weighted, so a large font scale squeezes it against
+                                // the arrange/Edit buttons; truncate rather than break
+                                // "Libera.Chat" across two lines.
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
                             // Arrange: swap with the neighbor and persist the order
                             // (drives the buffer-list section order too).
                             TextButton(
@@ -5494,13 +5555,16 @@ private fun NetworksScreen(
                             color = if (cfg.blocked) AlertRed else TextSecondary,
                             fontSize = 13.sp,
                         )
-                        Row {
+                        // FlowRow: two action words don't share one line at a large
+                        // font scale, and a Row answers that by squeezing the second
+                        // until it wraps a letter per line.
+                        FlowRow {
                             if (connected) {
                                 TextButton(onClick = { client.networkAction(cfg.id, "disconnect") }) {
-                                    Text("Disconnect", color = AlertRed, fontSize = 13.sp)
+                                    Text("Disconnect", color = AlertRed, fontSize = 13.sp, maxLines = 1, softWrap = false)
                                 }
                                 TextButton(onClick = { client.networkAction(cfg.id, "reconnect") }) {
-                                    Text("Reconnect", color = TextSecondary, fontSize = 13.sp)
+                                    Text("Reconnect", color = TextSecondary, fontSize = 13.sp, maxLines = 1, softWrap = false)
                                 }
                             } else {
                                 TextButton(
