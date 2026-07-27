@@ -1548,7 +1548,8 @@ private fun BufferListBody(
                                 pinned = client.isPinned(buffer),
                                 notifyAll = client.isNotifyAlways(buffer),
                                 muted = client.isNotifyMuted(buffer),
-                                showNetwork = section.network == "★ Pinned" || isFriendRow,
+                                showNetwork = section.network == "★ Pinned" || isFriendRow ||
+                                    section.network == "💬 New queries",
                                 // Green lock, matching the chat header. Prefer loaded
                                 // history (self-correcting if E2E is turned off); fall
                                 // back to the persisted known-E2E set for buffers whose
@@ -1646,6 +1647,22 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
         )
     }
 
+    // A query someone just opened is the most time-sensitive thing in the list, but
+    // it used to sit inside its network's group — potentially several screens down,
+    // so you had to scroll to notice it at all (freakyy85). Surface unread DMs in
+    // their own section up top. Friend DMs are skipped: they're already near the
+    // top in Friends, with a presence dot. The section only exists while something
+    // is unread, so it vanishes once you've caught up.
+    val queryRows = client.buffers.filter {
+        !it.isChannel && !it.isSystem && !it.isServerBuffer &&
+            it.key !in friendKeys && !client.isPinned(it) &&
+            (client.unread[it.key] ?: 0) > 0
+    }
+    val queryKeys = queryRows.map { it.key }.toSet()
+    if (queryRows.isNotEmpty()) {
+        out.add(BufferSection("💬 New queries", queryRows.sortedBy { it.target.lowercase() }))
+    }
+
     // Pinned + friend-primary buffers live only in their own sections — drop them
     // from the network group so they don't show twice (matches the web client).
     // Group by stable network id, NOT the buffer's stored networkName. That name
@@ -1657,6 +1674,7 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     val byNetwork = client.buffers
         .filterNot { client.isPinned(it) }
         .filterNot { it.key in friendKeys }
+        .filterNot { it.key in queryKeys }
         .groupBy { it.networkId }
     byNetwork.entries
         .sortedWith(
@@ -2027,10 +2045,22 @@ private fun ChatScreen(
         }
     }
 
-    val showLoadOlder = client.hasMoreOlder[buffer.key] == true && buffer.networkId != null
+    // hasMoreOlder doubles as the server's "unhydrated shell" marker (it ships
+    // true on a buffer whose backlog hasn't been fetched yet), so it stays true on
+    // a brand-new query that turns out to have no history at all — leaving a
+    // "Load older messages" button with nothing behind it (freakyy85). Require a
+    // real message to page back FROM, which is exactly when loadOlder() can act:
+    // it early-returns without an oldest id.
+    val showLoadOlder = client.hasMoreOlder[buffer.key] == true &&
+        buffer.networkId != null &&
+        messages.any { it.id > 0 }
     val loadingOlder = client.loadingOlder[buffer.key] == true
     val typers = client.typing[buffer.key]?.keys?.sorted() ?: emptyList()
     var joinPrompt by remember { mutableStateOf<String?>(null) }
+    // Tapping a #channel in any message offers to join it (freakyy85). Null on
+    // the :system: buffer, which has no network to join on.
+    val chanTap: ((String) -> Unit)? =
+        if (buffer.networkId != null) ({ chan -> joinPrompt = chan }) else null
     var viewerUrl by remember { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
     // Route taps: images open the in-app viewer, av media goes to the system
@@ -2250,12 +2280,14 @@ private fun ChatScreen(
                             onMediaLoaded = { mediaTick++ },
                             flash = row.msg.id == flashMsgId,
                             onNickTap = { replyTo(row.msg) },
+                            onChannel = chanTap,
                         )
                     } else MessageBubble(
                         row.msg, row.first, row.last, baseSize, openLink,
                         onMediaLoaded = { mediaTick++ },
                         onAction = { actionMsg = it },
                         onSwipeReply = { replyTo(it) },
+                        onChannel = chanTap,
                         flash = row.msg.id == flashMsgId,
                         revealProvider = { revealAnim.value },
                         revealMaxPx = revealMaxPx,
@@ -2588,6 +2620,12 @@ private fun ChatScreen(
                 client.setDraftLocal(buffer, t)
                 actionMsg = null
             },
+            onWhois = if (buffer.networkId != null) {
+                {
+                    client.execute(buffer, listOf(WireOp("raw", line = "WHOIS ${m.nick}")))
+                    actionMsg = null
+                }
+            } else null,
             onDismiss = { actionMsg = null },
         )
     }
@@ -2968,6 +3006,8 @@ private fun MessageActions(
     client: LurkerClient,
     onReply: () -> Unit,
     onQuote: () -> Unit,
+    // Null on the :system: buffer, where there's no network to ask.
+    onWhois: (() -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
@@ -2991,6 +3031,12 @@ private fun MessageActions(
         }
         SheetAction("Reply") { onReply() }
         SheetAction("Quote") { onQuote() }
+        // Long-press → whois the sender; reply stays a short press (freakyy85).
+        // Also covers "whois the person I'm in a query with", since their lines
+        // are the ones you'd long-press there.
+        if (onWhois != null && !msg.self && msg.nick.isNotBlank()) {
+            SheetAction("Whois ${msg.nick}") { onWhois() }
+        }
         SheetAction("Share…") {
             val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                 type = "text/plain"
@@ -3057,6 +3103,7 @@ private fun MessageBubble(
     onMediaLoaded: () -> Unit = {},
     onAction: ((Msg) -> Unit)? = null,
     onSwipeReply: ((Msg) -> Unit)? = null,
+    onChannel: ((String) -> Unit)? = null,
     flash: Boolean = false,
     // iMessage-style timestamp reveal. revealProvider returns the shared offset
     // (0 = hidden, negative = pulled left); onReveal feeds a left-drag delta into
@@ -3207,7 +3254,7 @@ private fun MessageBubble(
                 )
                 .padding(horizontal = 13.dp, vertical = vPad),
         ) {
-            val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink)
+            val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink, onChannel)
             Text(
                 if (msg.type == "error") buildAnnotatedString {
                     withStyle(SpanStyle(color = AlertRed)) { append(body) }
@@ -3254,6 +3301,7 @@ private fun CompactMessageRow(
     onMediaLoaded: () -> Unit = {},
     flash: Boolean = false,
     onNickTap: (() -> Unit)? = null,
+    onChannel: ((String) -> Unit)? = null,
 ) {
     val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
     val goldHighlight = !msg.self && paintedBg == null && (msg.matched || flash)
@@ -3274,7 +3322,7 @@ private fun CompactMessageRow(
             withStyle(nickStyle) { append(msg.nick) }
         }
         append("  ")
-        val body = mircAnnotated(msg.text, AccentBlue, onLink)
+        val body = mircAnnotated(msg.text, AccentBlue, onLink, onChannel)
         when (msg.type) {
             "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
             "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }
