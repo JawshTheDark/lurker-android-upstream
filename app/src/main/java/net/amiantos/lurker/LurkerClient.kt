@@ -40,6 +40,19 @@ import java.util.concurrent.TimeUnit
 /** WireOp types carrying user text, so a drop is worth retaining for a retry. */
 internal val SENDABLE_OPS = setOf("send", "action", "notice")
 
+/**
+ * The nick a raw WHOIS line asks about, lowercased, or null if [line] isn't one.
+ *
+ * Both `WHOIS <nick>` and the server-targeted `WHOIS <server> <nick>` put the nick
+ * last, so the last token is right for either. Used to match a broadcast
+ * `whois_result` back to the request this client made.
+ */
+internal fun whoisTargetNick(line: String?): String? {
+    val parts = line?.trim()?.split(Regex("\\s+")).orEmpty()
+    if (parts.size < 2 || !parts[0].equals("WHOIS", true)) return null
+    return parts.last().lowercase()
+}
+
 open class LurkerClient {
     /** True for the Lurker-server backend; DirectIrcBackend overrides to false to
      *  hide server-only surfaces (search, highlights, DCC, settings registry,
@@ -190,6 +203,18 @@ open class LurkerClient {
      *  row with Resend / Discard; entries live until the user acts on them. */
     val failedSends = mutableStateMapOf<String, FailedSend>()
     private var failedSeq = 0
+
+    /**
+     * Whois requests THIS client issued: "networkId::nickLower" -> (bufferKey, atMs).
+     *
+     * `whois_result` is published ephemerally to every one of the account's
+     * connected clients and carries no attribution, so a whois run in Lurker web —
+     * even on a different network — used to print into whatever buffer Spooky
+     * happened to have open (freakyy85). Matching replies against our own
+     * outstanding requests keeps someone else's whois out, and lands ours in the
+     * buffer it was actually issued from.
+     */
+    private val pendingWhois = mutableMapOf<String, Pair<String, Long>>()
 
     /** bufferKey -> server read cursor (highest id the user has read). */
     private val lastRead = mutableMapOf<String, Long>()
@@ -400,6 +425,8 @@ open class LurkerClient {
             hasMoreOlder.clear()
             loadingOlder.clear()
             pendingSends.clear()
+            pendingWhois.clear()
+            failedSends.clear()
             transfers.clear()
             drafts.clear()
             inputHistory.clear()
@@ -1317,10 +1344,20 @@ open class LurkerClient {
         return fallback
     }
 
-    /** Render a whois_result into the currently focused buffer as a block. */
+    /**
+     * Render a whois_result — but only one we asked for, into the buffer we asked
+     * from. The event is broadcast to all of the account's clients with no sender
+     * attribution, so an unmatched reply belongs to another client (Lurker web, a
+     * second device) and is dropped here. Nothing is lost by dropping it: the
+     * server still writes the raw whois numerics to that network's Server buffer.
+     */
     private fun handleWhoisResult(frame: JSONObject) {
-        val key = activeKey ?: return
         val w = frame.optJSONObject("whois") ?: return
+        val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
+        val nick = w.optString("nick").lowercase()
+        if (nick.isEmpty()) return
+        val (key, askedAt) = pendingWhois.remove("$networkId::$nick") ?: return
+        if (System.currentTimeMillis() - askedAt > WHOIS_REPLY_WINDOW) return
         val msg = Msg(
             id = 0,
             type = "whois",
@@ -1856,7 +1893,21 @@ open class LurkerClient {
                     pendingSends[clientId] = PendingSend(key, networkId, target, op.type, op.text.orEmpty())
                     main.postDelayed({ failSend(clientId, "no acknowledgement (timeout)") }, SEND_ACK_TIMEOUT)
                 }
-                "raw" -> frame.put("type", "raw").put("line", op.line)
+                "raw" -> {
+                    frame.put("type", "raw").put("line", op.line)
+                    // Note a whois we're asking for, so its broadcast reply can be
+                    // told apart from another client's and land back here. Covers
+                    // both entry points (/whois and the nick sheet) since each
+                    // lowers to a raw WHOIS line. Last token is the nick in both
+                    // "WHOIS nick" and the server-targeted "WHOIS server nick".
+                    whoisTargetNick(op.line)?.let { nick ->
+                        val now = System.currentTimeMillis()
+                        // Drop requests that never got an answer, so a flaky
+                        // network can't grow this map without bound.
+                        pendingWhois.values.retainAll { now - it.second <= WHOIS_REPLY_WINDOW }
+                        pendingWhois["$networkId::$nick"] = buffer.key to now
+                    }
+                }
                 // {type:'e2e', networkId, target, args} — server runs the subcommand.
                 "e2e" -> frame.put("type", "e2e").put("target", target).put("args", op.line.orEmpty())
                 "join" -> {
@@ -2605,6 +2656,11 @@ open class LurkerClient {
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 30_000L
         const val SEND_ACK_TIMEOUT = 8_000L // matches the web client's deadline
+
+        /** How long a whois we issued stays eligible to claim a broadcast reply.
+         *  Generous — replies are near-instant, but a lagging server shouldn't
+         *  silently swallow the answer. */
+        const val WHOIS_REPLY_WINDOW = 60_000L
 
         /** How long an `active` typing signal lives without a refresh. */
         const val TYPING_TTL = 6_000L
