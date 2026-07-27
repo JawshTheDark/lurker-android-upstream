@@ -5731,7 +5731,10 @@ private fun SearchScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().padding(16.dp, 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 SearchTab("Messages", tab == 0) { tab = 0 }
                 SearchTab("Highlights", tab == 1) { tab = 1 }
                 SearchTab("Bookmarks", tab == 2) { tab = 2 }
@@ -5814,12 +5817,35 @@ private fun SearchTab(label: String, selected: Boolean, onClick: () -> Unit) {
         label,
         color = if (selected) AccentBlue else TextSecondary,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        fontSize = 15.sp,
+        fontSize = cappedSp(15f, TAB_MAX_FONT_SCALE),
+        // One word per tab — never break it. The capped size is what keeps all
+        // three on the line; this just guarantees it can't wrap if they ever grow.
+        maxLines = 1,
+        softWrap = false,
         modifier = Modifier
             .background(if (selected) SurfaceRaised else Color.Transparent, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
     )
+}
+
+/** How far the search tabs follow the system font scale before they stop. Three
+ *  labels share one row; past this they no longer fit, and a Row answers that by
+ *  squeezing the last one until it wraps a letter per line. */
+private const val TAB_MAX_FONT_SCALE = 1.0f
+
+/**
+ * [base] sp, but scaled by at most [maxScale] of the system font setting.
+ *
+ * An sp value is already multiplied by the user's font scale, so to render at
+ * `base * min(scale, maxScale)` the value handed over has to be divided back down
+ * by the live scale. Below the cap this returns exactly [base], leaving normal
+ * text sizes untouched.
+ */
+@Composable
+private fun cappedSp(base: Float, maxScale: Float): androidx.compose.ui.unit.TextUnit {
+    val scale = LocalDensity.current.fontScale
+    return if (scale <= maxScale) base.sp else (base * maxScale / scale).sp
 }
 
 @Composable
@@ -6125,9 +6151,13 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
             } else {
                 // Colour key: each word IS its status colour.
                 item {
-                    Row(
+                    // FlowRow, not Row: at a large system font scale four words
+                    // don't fit on one line, and a Row would squeeze the last one
+                    // until it wrapped letter by letter. This wraps between words.
+                    FlowRow(
                         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text("online", color = OnlineGreen, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         Text("away", color = NoticeAmber, fontSize = 12.sp, fontWeight = FontWeight.Medium)
