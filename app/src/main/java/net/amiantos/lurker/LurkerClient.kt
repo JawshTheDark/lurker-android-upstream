@@ -181,6 +181,33 @@ open class LurkerClient {
     private var chanlistSortBy = "users"
     private var chanlistSortDir = "desc"
 
+    /**
+     * The server's advertised upload ceiling in BYTES (lurker#627 / PR #648), or 0
+     * when the server is too old to advertise one.
+     *
+     * Advisory, not a contract: it's resolved for the default uploader at connect
+     * time, so an operator change mid-session or a per-upload override is still
+     * settled by the 413. The server has already subtracted its own multipart
+     * envelope headroom, so compare a raw file size straight against it — don't
+     * add another margin. Re-sent on the `settings` frame when the cap changes.
+     */
+    var maxUploadBytes by mutableStateOf(0L)
+        private set
+
+    /**
+     * True once the server's connect burst has finished (lurker#635 / PR #640):
+     * the terminal `backlog-complete` frame arrived, so every buffer it was going
+     * to send has been sent.
+     *
+     * Absence of a buffer at this point means "not currently open", NOT "never
+     * existed" — a closed buffer keeps its full persisted history, reachable with
+     * open-buffer. So this must never drive discarding local history, drafts or
+     * read positions; it only tells us to stop waiting. Suppressed by the server
+     * if the burst errors midway, so it staying false is meaningful too.
+     */
+    var snapshotComplete by mutableStateOf(false)
+        private set
+
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
 
@@ -628,6 +655,9 @@ open class LurkerClient {
                 lastFrameAt = System.currentTimeMillis()
                 webSocket.send(presenceFrame(true))
                 post {
+                    // A new socket means a new burst: don't let the previous
+                    // connection's completion vouch for buffers not yet re-sent.
+                    snapshotComplete = false
                     connected = true
                     connecting = false
                     status = null
@@ -724,6 +754,25 @@ open class LurkerClient {
                     applyAliases(frame.optJSONArray("aliases"))
                 }
                 if (frame.has("globalIgnores")) applyIgnoreScope(null, frame.optJSONArray("globalIgnores"))
+                // 0 on an older server that doesn't advertise a cap — we then
+                // upload unchecked exactly as before and let the 413 decide.
+                if (frame.has("maxUploadBytes")) maxUploadBytes = frame.optLong("maxUploadBytes")
+            }
+
+            // The burst's terminal frame. A fresh burst (reconnect, in-band resync,
+            // fresh-network re-emission) re-arms this in onOpen. Logged because its
+            // ABSENCE is the interesting case in a bug report: an old server, or a
+            // burst the server abandoned midway.
+            "backlog-complete" -> {
+                snapshotComplete = true
+                DebugLog.i("ws", "backlog-complete (${buffers.size} buffers)")
+            }
+
+            // Carries the recomputed effective cap when the user changes their
+            // upload setting, so we don't keep sizing against a stale number for
+            // the rest of the session.
+            "settings" -> {
+                if (frame.has("maxUploadBytes")) maxUploadBytes = frame.optLong("maxUploadBytes")
             }
 
             "ignore-list-updated" -> {

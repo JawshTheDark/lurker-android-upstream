@@ -1956,8 +1956,19 @@ private fun ChatScreen(
     // Self-heal: if we land on an empty buffer (e.g. a notification opened it while
     // the socket was still reconnecting, so the initial open() was dropped),
     // re-request its history once we're connected.
-    LaunchedEffect(client.connected, buffer.key, messages.isEmpty()) {
-        if (client.connected && messages.isEmpty() && buffer.networkId != null) client.open(buffer)
+    //
+    // Prefer waiting for the connect burst to finish (lurker#635's
+    // backlog-complete) rather than racing it: open-buffer JOINs a channel as a
+    // side effect, so asking for a buffer whose frame was still in flight isn't
+    // free. Empty-once-complete means "not currently open" — never "gone" — so
+    // this only re-asks, and touches no local history, draft or read position.
+    // A server too old to send the frame falls back to a short grace period, so a
+    // dropped open() still self-heals there as it always did.
+    LaunchedEffect(client.connected, client.snapshotComplete, buffer.key, messages.isEmpty()) {
+        if (!client.connected || messages.isNotEmpty() || buffer.networkId == null) return@LaunchedEffect
+        if (!client.snapshotComplete) delay(2_000)
+        // Re-read: the buffer may have arrived while we waited.
+        if (client.connected && client.messagesByBuffer[buffer.key].isNullOrEmpty()) client.open(buffer)
     }
     // No "channel is encrypted" frame exists; infer from recent E2E traffic.
     val e2eActive = remember(messages.size) { messages.takeLast(200).any { it.e2e } }
@@ -1992,6 +2003,13 @@ private fun ChatScreen(
         val upload = readUpload(context, uri)
         if (upload == null) {
             client.localNotice(buffer, "Couldn't read that file.")
+            return
+        }
+        // Refuse before sending anything: the server advertises its real ceiling
+        // now, so an oversized pick fails instantly instead of streaming the whole
+        // file up over cellular to earn a 413 (lurker#627).
+        uploadTooLarge(upload.second.contentLength(), client.maxUploadBytes)?.let { why ->
+            client.localNotice(buffer, why)
             return
         }
         client.uploadFile(upload.first, upload.second) { url, err ->
@@ -3061,6 +3079,23 @@ private fun MessageActions(
  * and no buffering — the body streams straight from the content provider into
  * the socket, so a multi-GB file costs a few KB of memory.
  */
+/**
+ * Why an upload can't go out, or null when it can (lurker#627 / PR #648).
+ *
+ * Checked BEFORE a byte leaves the phone: without the server's advertised ceiling
+ * a too-large file streamed all the way up over cellular only to come back a 413.
+ * The advertised number already has the server's multipart headroom subtracted, so
+ * the raw size is compared straight against it. Decimal MB (10^6) to match the
+ * server's own 413 text, so the two can't contradict each other. Silent when the
+ * server advertises nothing (older build) or the picker gave no size — then we
+ * upload as before and let the 413 arbitrate.
+ */
+internal fun uploadTooLarge(sizeBytes: Long, maxUploadBytes: Long): String? {
+    if (maxUploadBytes <= 0L || sizeBytes <= 0L || sizeBytes <= maxUploadBytes) return null
+    fun mb(b: Long) = "%.1f".format(b / 1_000_000.0).removeSuffix(".0")
+    return "That file is ${mb(sizeBytes)} MB — this server accepts up to ${mb(maxUploadBytes)} MB."
+}
+
 private fun readUpload(
     context: android.content.Context,
     uri: android.net.Uri,
