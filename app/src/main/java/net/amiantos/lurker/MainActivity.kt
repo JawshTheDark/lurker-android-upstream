@@ -2179,6 +2179,24 @@ private fun ChatScreen(
             }
         }
     }
+    // Where the viewport goes after YOU send something. This used to be purely the
+    // client author's call — Spooky kept your position, the web client re-pinned —
+    // so the server now owns it as `chat.keep_position_on_send` (lurker#628 / PR
+    // #667) and every client agrees. Server default is off: re-pin to the newest
+    // message. Absent on a server too old to register the key, where the same
+    // default applies. Once the server ships it the toggle appears in Settings on
+    // its own, since that screen is driven by the settings registry.
+    val keepPositionOnSend = client.settingBool("chat.keep_position_on_send", false)
+    val chatScope = rememberCoroutineScope()
+    // Re-pin to the bottom. Scrolls against the CURRENT rows, which is one short of
+    // the line being sent — that's fine and self-correcting: it lands us inside the
+    // atBottom slack, so the tail-follow below catches the new row when it arrives.
+    fun repinToTail() {
+        chatScope.launch {
+            listState.scrollToItem((rows.lastIndex + headerCount).coerceAtLeast(0))
+        }
+    }
+
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
@@ -2540,8 +2558,16 @@ private fun ChatScreen(
                             parsed.openTarget?.let { target ->
                                 buffer.networkId?.let { onOpenBuffer(client.focusTarget(it, target)) }
                             }
+                            // Only a plain message (or /me, /notice) is subject to
+                            // the keep-position preference. A command always re-pins:
+                            // its reply comes back as id-less rows that the stay-put
+                            // logic can't count, so it would land silently below the
+                            // fold with nothing to say it arrived.
+                            val wasMessage = parsed.ops.all { it.type in SENDABLE_OPS }
+                            if (!keepPositionOnSend || !wasMessage) repinToTail()
                         }
-                        is ParsedInput.Local -> client.localNotice(buffer, parsed.message)
+                        // Local command output (/help and friends) is id-less too.
+                        is ParsedInput.Local -> { client.localNotice(buffer, parsed.message); repinToTail() }
                         is ParsedInput.Browse ->
                             // Lurker has a rich channel browser; direct mode falls back
                             // to a raw LIST (results land in the server buffer).
