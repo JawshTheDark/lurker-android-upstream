@@ -52,6 +52,42 @@ internal fun staleBufferKeys(baseline: Set<String>, seen: Set<String>): Set<Stri
     if (seen.isEmpty()) emptySet() else baseline - seen
 
 /**
+ * The event types the `chat.events` tiers treat as noise (lurker#672).
+ *
+ * Presence churn only. A kick, a topic change or an invite is something that
+ * happened TO the channel and is never hidden — hiding those would lose real
+ * information, not noise.
+ */
+internal val NOISE_EVENT_TYPES = setOf("join", "part", "quit", "nick", "chghost")
+
+/**
+ * Whether a message survives the `chat.events` tier (lurker#672).
+ *
+ * - `none` hides presence churn outright.
+ * - `smart` keeps churn only for people who have actually said something in the
+ *   buffer — the point being that a stranger joining and leaving is noise, while
+ *   someone you were just talking to leaving is not.
+ * - anything else (`all`, or an unknown value from a newer server) shows it.
+ *
+ * Your own lines are never hidden, whatever the tier: seeing your own join
+ * confirms the channel worked.
+ */
+internal fun passesEventFilter(
+    type: String,
+    nick: String,
+    self: Boolean,
+    tier: String,
+    speakers: Set<String>,
+): Boolean {
+    if (type !in NOISE_EVENT_TYPES || self) return true
+    return when (tier) {
+        "none" -> false
+        "smart" -> nick.lowercase() in speakers
+        else -> true
+    }
+}
+
+/**
  * The nick a raw WHOIS line asks about, lowercased, or null if [line] isn't one.
  *
  * Both `WHOIS <nick>` and the server-targeted `WHOIS <server> <nick>` put the nick
@@ -1158,6 +1194,12 @@ open class LurkerClient {
                 val key = "${networkId ?: "sys"}::$target"
                 loadingOlder.remove(key)
                 if (frame.has("hasMoreOlder")) hasMoreOlder[key] = frame.optBoolean("hasMoreOlder")
+                // A mode:'latest' hydrate carries the buffer's recall list, and it's
+                // the only frame that does — a reloaded client gets its up-arrow
+                // history back here or not at all (lurker#671).
+                frame.optJSONArray("inputHistory")?.let { h ->
+                    inputHistory[key] = (0 until h.length()).map { h.optString(it) }
+                }
                 val parsed = parseEvents(frame.optJSONArray("events"))
                 if (parsed.isEmpty()) return
                 val existing = messagesByBuffer[key] ?: emptyList()
@@ -1226,6 +1268,7 @@ open class LurkerClient {
                 .put("mode", "before")
                 .put("before", oldest)
                 .put("limit", 100)
+                .put("countBy", pageCountUnit())
                 .toString(),
         )
     }
@@ -1463,6 +1506,37 @@ open class LurkerClient {
         (settingsRegistry.firstOrNull { it.key == key }?.default as? Boolean)?.let { return it }
         return fallback
     }
+
+    fun settingString(key: String, fallback: String): String {
+        (settingsValues[key] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+        (settingsRegistry.firstOrNull { it.key == key }?.default as? String)
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
+        return fallback
+    }
+
+    /**
+     * How much join/part/quit noise to show: `all` / `smart` / `none` (lurker#672).
+     *
+     * The mobile variant wins where the server offers one — a phone has far less
+     * room for noise than a desktop, which is the whole reason it exists. Falls
+     * back to `all`, matching the server's default, so a server too old to
+     * advertise either key behaves exactly as before.
+     */
+    val eventFilterTier: String
+        get() = settingString("chat.events.mobile", "").ifEmpty { settingString("chat.events", "all") }
+
+    /**
+     * What a history page should be counted in (lurker#670).
+     *
+     * While we're hiding presence churn, a page measured in stored rows can arrive
+     * almost entirely invisible — a screenful that renders as nothing, and a "Load
+     * older" that appears to do nothing. Asking for `renderable` sizes the page by
+     * lines that will actually be drawn. Older servers ignore the field, so this is
+     * safe to send unconditionally.
+     */
+    private fun pageCountUnit(): String =
+        if (eventFilterTier == "all") "event" else "renderable"
 
     /**
      * Render a whois_result — but only one we asked for, into the buffer we asked
@@ -1953,9 +2027,37 @@ open class LurkerClient {
 
     /** Ensure a DM/channel buffer exists, hydrate it, and return it for focusing. */
     fun focusTarget(networkId: Int, target: String): Buffer {
+        // Check BEFORE ensureBuffer, which would create it locally either way.
+        val held = buffers.any { it.networkId == networkId && it.target.equals(target, true) }
         val buffer = ensureBuffer(networkId, target)
-        open(buffer)
+        // A buffer we already hold only needs its contents — that's a read now.
+        // One we don't hold may be closed server-side, so it needs the write.
+        if (held) hydrate(buffer) else open(buffer)
         return buffer
+    }
+
+    /**
+     * Fetch a buffer's newest page — the read-only hydration path (lurker#671).
+     *
+     * `open-buffer` used to serve double duty as both read and write; it's now the
+     * write alone, and it isn't free — it (re)opens the buffer server-side and
+     * JOINs a channel as a side effect, and it announces to the account's other
+     * devices. So anything that just wants contents asks for them instead.
+     *
+     * The reply also carries `inputHistory`, which is the only way a reloaded
+     * client gets its per-buffer up-arrow recall back.
+     */
+    fun hydrate(buffer: Buffer) {
+        val networkId = buffer.networkId ?: return
+        ws?.send(
+            JSONObject()
+                .put("type", "history")
+                .put("mode", "latest")
+                .put("networkId", networkId)
+                .put("target", buffer.target)
+                .put("countBy", pageCountUnit())
+                .toString(),
+        )
     }
 
     /** Append a locally-generated line (command help / usage errors) to a buffer. */

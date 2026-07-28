@@ -388,7 +388,6 @@ class MainActivity : FragmentActivity() {
                 LaunchedEffect(pendingDeepLink) {
                     pendingDeepLink?.let { (nid, tgt, mid) ->
                         val buffer = client.focusTarget(nid, tgt)
-                        client.open(buffer)
                         client.setActive(buffer)
                         screen = Screen.Chat(buffer, scrollToMsgId = mid.takeIf { it > 0 })
                         pendingDeepLink = null
@@ -399,7 +398,7 @@ class MainActivity : FragmentActivity() {
                 // already-open channel we asked to /join — opens itself.
                 LaunchedEffect(client.pendingOpen) {
                     client.pendingOpen?.let { buffer ->
-                        client.open(buffer)
+                        client.hydrate(buffer)
                         client.setActive(buffer)
                         screen = Screen.Chat(buffer)
                         client.pendingOpen = null
@@ -1972,12 +1971,28 @@ private fun ChatScreen(
         if (!client.connected || messages.isNotEmpty() || buffer.networkId == null) return@LaunchedEffect
         if (!client.snapshotComplete) delay(2_000)
         // Re-read: the buffer may have arrived while we waited.
-        if (client.connected && client.messagesByBuffer[buffer.key].isNullOrEmpty()) client.open(buffer)
+        if (client.connected && client.messagesByBuffer[buffer.key].isNullOrEmpty()) client.hydrate(buffer)
     }
     // No "channel is encrypted" frame exists; infer from recent E2E traffic.
     val e2eActive = remember(messages.size) { messages.takeLast(200).any { it.e2e } }
     val divider = client.dividerAfter[buffer.key]
-    val rows = remember(messages, divider) { buildChatRows(messages, divider) }
+    // Event-noise tier (lurker#672). Speakers are derived from what's loaded rather
+    // than tracked separately, so "smart" stays consistent with what's on screen
+    // and works in direct mode too. Only the RENDER is filtered — tail-following,
+    // paging and unread still reason about every message.
+    val eventTier = client.eventFilterTier
+    val visible = remember(messages, eventTier) {
+        if (eventTier == "all") {
+            messages
+        } else {
+            val speakers = messages.asSequence()
+                .filter { it.type == "message" || it.type == "action" || it.type == "notice" }
+                .map { it.nick.lowercase() }
+                .toSet()
+            messages.filter { passesEventFilter(it.type, it.nick, it.self, eventTier, speakers) }
+        }
+    }
+    val rows = remember(visible, divider) { buildChatRows(visible, divider) }
     val listState = rememberLazyListState()
     // iMessage-style swipe-to-reveal timestamps (amiantos): timestamps are hidden;
     // a left-drag on any bubble pulls ALL bubbles over via this one shared offset,
