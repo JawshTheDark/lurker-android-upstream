@@ -8,7 +8,9 @@ even without a Lurker server at all.
 > **Status: release-candidate.** What began as a spike to prove Lurker's bearer-token contract could
 > drive a native client has grown into a daily driver: signed-in persistence, resilient reconnect,
 > formatted chat, member lists, uploads, search, DCC, notifications, and a full second backend that
-> speaks raw IRC and bouncers. Actively used against production servers and the hosted app.
+> speaks raw IRC and bouncers. Actively used against production servers and the hosted app, and
+> released often — see [Releases](https://github.com/JawshTheDark/lurker-android-upstream/releases)
+> for the APK and the running changelog.
 
 ## Two ways to run it
 
@@ -32,32 +34,48 @@ Pick the mode on first launch; it can be switched later from Settings.
 ## Features
 
 - **Stays signed in.** The session is saved to app-private storage and reconnects silently on launch.
-  Optional biometric / device-credential lock on open.
+  Optional biometric / device-credential locks (see [Security notes](#security-notes)).
 - **Resilient.** Auto-reconnect with backoff; on return from background it resumes with `?since=` so
-  nothing is missed. An optional foreground service holds the connection open for reliable
-  notifications.
+  nothing is missed. Conversations closed on another client are reconciled away on reconnect, and an
+  optional foreground service holds the connection open for reliable notifications.
 - **Reads like a chat app.** iMessage-style bubbles with sender grouping, mIRC color + formatting
   (bold / italic / underline / mono), tappable links, and inline system lines for joins, parts,
-  quits, nick changes, kicks, modes, and topics. Light / Dark / OLED themes and a 24-hour clock
-  option; font size scales cleanly.
+  quits, nick changes, kicks, modes, and topics. Or flip to **compact mode** — dense
+  `time · nick · message` rows — globally or per channel. Layouts hold together at the system's
+  largest font sizes.
+- **Make it yours.** Light / Dark / OLED themes, an accent colour (presets or a full HSV picker),
+  chat typeface, message density, optional nick colouring, a 24-hour clock, and a chat background
+  image — set globally or **per channel**.
 - **Inline media.** Images, GIFs, and video embed in the timeline with a built-in viewer.
+- **Multi-channel.** Opt any set of channels into one merged, pinned firehose — bubbles or compact,
+  every line tagged `network · channel · nick`, and tapping one jumps straight to that message in
+  its real channel.
 - **Buffer list that scales.** Grouped by network, DMs after channels, active buffers floated up,
-  unread + highlight badges, pins, and mark-all-read. Secure (E2E) buffers show a lock.
+  unread + highlight badges, pins, and mark-all-read. Unread queries get their own section at the
+  top so a new DM can't hide down the list. Secure (E2E) buffers show a lock.
 - **Mentions.** Highlighted messages get a gold bubble (colour configurable), and tapping a
-  notification opens the channel and jumps to the exact message.
+  notification opens the channel and jumps to the exact message. Notifications are actionable —
+  reply, mark read, or mute — including from a paired Wear OS watch.
 - **Members.** Full member list with op/voice prefixes and per-nick actions (query, whois, op, kick,
-  ban, notes…).
+  ban, notes…). Long-press any message to whois its sender; tap a `#channel` in any message to be
+  offered the join.
 - **Composer.** Formatting toolbar + colour picker, tab-completion for nicks and commands, typing
-  indicators, swipe-to-reply, and image/file uploads (plus Android share-sheet targets).
+  indicators, swipe-to-reply, and image/file uploads (plus Android share-sheet targets). Oversized
+  files are refused up front against the ceiling the server advertises, rather than after the upload.
+- **Nothing sent is lost.** A message that can't go out — offline, mid-reconnect, rejected, or
+  unacknowledged — is kept in place with **Resend / Edit / Discard** instead of vanishing.
 - **Slash-commands.** `/me`, `/msg`, `/query`, `/join`, `/part`, `/nick`, `/topic`, `/kick`, `/mode`,
   `/op`, `/ban`, `/whois`, `/away`, `/ctcp`, `/list`, `/raw`, … (`/help` lists them). `//` sends a
   literal leading slash.
 - **Channel browser.** `/list` opens a searchable, sortable channel directory that streams results
   live as the server's `LIST` completes.
-- **Search & contacts.** Server-side message search with highlights; friends / notes / ignores.
+- **Search & contacts.** Server-side message search, highlights, and bookmarks. Friends carry
+  multiple per-network identities and show presence on each — green online, yellow away, red
+  offline, grey unknown.
 - **DCC.** Receive **and** send file transfers, plus DCC chat, with live progress.
 - **Settings.** A registry-driven editor over the server's settings surface — every advertised
-  setting is editable by type — alongside device-local app preferences.
+  setting is editable by type — alongside device-local app preferences. Includes an in-app
+  diagnostics log (connection + error history) to paste into a bug report.
 
 ## Flavors
 
@@ -95,6 +113,11 @@ for local dev servers.
 - **Sessions** live in app-private storage, unreadable by other apps on a non-rooted device.
 - **Direct-mode IRC/SASL secrets** are encrypted at rest via `EncryptedSharedPreferences` — direct
   mode stores real IRC account passwords, so these are kept out of cleartext.
+- **Locks.** Optional biometric / device-credential gates on opening the app and on opening an
+  encrypted (E2E) channel. Changing either one requires an unlock **in both directions**, so a lock
+  can't be switched off by a stray tap; the confirmation fails closed.
+- **Encrypted channels set `FLAG_SECURE`** while on screen — no screenshots, no screen recording,
+  and no content in the recents thumbnail.
 
 ## Architecture
 
