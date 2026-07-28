@@ -1964,7 +1964,11 @@ private fun ChatScreen(
     // this only re-asks, and touches no local history, draft or read position.
     // A server too old to send the frame falls back to a short grace period, so a
     // dropped open() still self-heals there as it always did.
-    LaunchedEffect(client.connected, client.snapshotComplete, buffer.key, messages.isEmpty()) {
+    // Keyed on burstGeneration, not just `connected`: a socket can die and be
+    // replaced without `connected` ever being observed false, which leaves anything
+    // watching connection state alone waiting forever (lurker-ios#78). The counter
+    // changes on every burst, so the retry always re-arms.
+    LaunchedEffect(client.burstGeneration, client.snapshotComplete, buffer.key, messages.isEmpty()) {
         if (!client.connected || messages.isNotEmpty() || buffer.networkId == null) return@LaunchedEffect
         if (!client.snapshotComplete) delay(2_000)
         // Re-read: the buffer may have arrived while we waited.

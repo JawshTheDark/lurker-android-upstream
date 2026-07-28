@@ -41,6 +41,17 @@ import java.util.concurrent.TimeUnit
 internal val SENDABLE_OPS = setOf("send", "action", "notice")
 
 /**
+ * Which of [baseline] a connect burst closed elsewhere, given the keys it
+ * enumerated in [seen] (lurker-ios#78).
+ *
+ * Empty when the burst enumerated nothing: that's a burst the server abandoned or
+ * one we somehow missed entirely, and it says nothing about what's open — pruning
+ * the whole baseline off it would wipe the buffer list.
+ */
+internal fun staleBufferKeys(baseline: Set<String>, seen: Set<String>): Set<String> =
+    if (seen.isEmpty()) emptySet() else baseline - seen
+
+/**
  * The nick a raw WHOIS line asks about, lowercased, or null if [line] isn't one.
  *
  * Both `WHOIS <nick>` and the server-targeted `WHOIS <server> <nick>` put the nick
@@ -207,6 +218,23 @@ open class LurkerClient {
      */
     var snapshotComplete by mutableStateOf(false)
         private set
+
+    /**
+     * Bumped once per connect burst. Keying retries on this rather than on
+     * [connected] is what makes them fire after a SILENT socket replacement — the
+     * old socket dies and a new one takes over without `connected` ever being
+     * observed false, so anything watching connection state alone waits forever
+     * (lurker-ios#78). A counter always changes value, so a burst that completes
+     * inside a single snapshot frame can't be collapsed the way a boolean can.
+     */
+    var burstGeneration by mutableStateOf(0)
+        private set
+
+    // Buffer keys the CURRENT burst has enumerated, and the keys we already held
+    // when it began. On backlog-complete, anything in the baseline the burst never
+    // mentioned has been closed elsewhere — see reconcileBuffers.
+    private val burstSeen = mutableSetOf<String>()
+    private var burstBaseline = emptySet<String>()
 
     /** bufferKey -> whether older history exists beyond what's loaded. */
     val hasMoreOlder = mutableStateMapOf<String, Boolean>()
@@ -658,6 +686,11 @@ open class LurkerClient {
                     // A new socket means a new burst: don't let the previous
                     // connection's completion vouch for buffers not yet re-sent.
                     snapshotComplete = false
+                    burstGeneration++
+                    // Snapshot what we hold NOW, so a buffer opened while the burst
+                    // is still arriving can't be mistaken for one the server omitted.
+                    burstBaseline = buffers.map { it.key }.toSet()
+                    burstSeen.clear()
                     connected = true
                     connecting = false
                     status = null
@@ -765,6 +798,7 @@ open class LurkerClient {
             // burst the server abandoned midway.
             "backlog-complete" -> {
                 snapshotComplete = true
+                reconcileBuffers()
                 DebugLog.i("ws", "backlog-complete (${buffers.size} buffers)")
             }
 
@@ -785,6 +819,7 @@ open class LurkerClient {
                 val target = frame.optString("target")
                 if (target.isEmpty()) return
                 val buffer = ensureBuffer(networkId, target)
+                burstSeen.add(buffer.key)
                 val events = frame.optJSONArray("events")
                 bumpCursorFromEvents(events)
                 val reset = frame.optBoolean("reset", false)
@@ -991,12 +1026,7 @@ open class LurkerClient {
 
             "buffer-closed" -> {
                 val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
-                val target = frame.optString("target")
-                val key = "${networkId ?: "sys"}::$target"
-                buffers.removeAll { it.key == key }
-                messagesByBuffer.remove(key)
-                unread.remove(key)
-                highlights.remove(key)
+                dropBuffer("${networkId ?: "sys"}::${frame.optString("target")}")
             }
 
             "search-result" -> {
@@ -1138,6 +1168,47 @@ open class LurkerClient {
 
             "error" -> status = frame.optString("text")
         }
+    }
+
+    /** Forget a buffer entirely — the row and everything keyed to it. */
+    private fun dropBuffer(key: String) {
+        buffers.removeAll { it.key == key }
+        messagesByBuffer.remove(key)
+        unread.remove(key)
+        highlights.remove(key)
+    }
+
+    /**
+     * Drop buffers the just-finished burst never mentioned (lurker-ios#78).
+     *
+     * A `buffer-closed` frame only reaches a client that's connected, so a channel
+     * closed from the web while we were backgrounded used to linger here until the
+     * next relaunch. The burst is the server's own statement of what's open, so
+     * anything it skipped has been closed elsewhere.
+     *
+     * Scoped to what we held when the burst STARTED, so a buffer opened while it
+     * was still arriving is never mistaken for an omission. System buffers are
+     * exempt: they're app-scoped rather than per-network and aren't enumerated the
+     * same way, so their absence proves nothing.
+     *
+     * This drops the local row, not server-side history — a closed buffer keeps its
+     * full backlog and comes back with everything intact when reopened, which is
+     * exactly the "not currently open" vs "never existed" distinction lurker#640
+     * draws.
+     *
+     * Runs once per socket: the baseline is cleared afterwards, so the later
+     * backlog-completes that an in-band resync or a fresh-network re-emission also
+     * produce can't prune against a stale picture.
+     */
+    private fun reconcileBuffers() {
+        val dropped = staleBufferKeys(burstBaseline, burstSeen).filter { key ->
+            // System buffers are app-scoped rather than per-network and aren't
+            // enumerated the same way, so their absence proves nothing.
+            buffers.firstOrNull { it.key == key }?.isSystem == false
+        }
+        dropped.forEach(::dropBuffer)
+        burstBaseline = emptySet()
+        if (dropped.isNotEmpty()) DebugLog.i("ws", "closed elsewhere: ${dropped.joinToString()}")
     }
 
     /** Ask for the page of history older than what's currently loaded. */
