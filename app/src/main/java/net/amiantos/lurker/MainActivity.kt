@@ -5104,9 +5104,62 @@ private fun BiometricLockCard(prefs: Prefs) {
     var on by remember { mutableStateOf(prefs.biometricLock) }
     PrefToggleCard(
         title = "Require unlock",
-        subtitle = "Ask for fingerprint, face, or device PIN each time the app opens.",
+        subtitle = "Ask for fingerprint, face, or device PIN each time the app opens. Changing this asks first.",
         checked = on,
-    ) { on = it; prefs.biometricLock = it }
+    ) { want ->
+        confirmIdentity(
+            context,
+            title = if (want) "Turn on app lock" else "Turn off app lock",
+        ) { ok ->
+            // Only commit on success. `on` is what drives the Switch, so leaving it
+            // alone snaps the toggle back on a failed or cancelled prompt.
+            if (ok) {
+                on = want
+                prefs.biometricLock = want
+            }
+        }
+    }
+}
+
+/**
+ * Confirm the person tapping is the owner, then report whether they were.
+ *
+ * Gates changes that are one stray tap from undoing the lock entirely — turning
+ * it off is exactly what someone who picked up an unlocked phone would try, and
+ * it's just as easy to hit by accident in a pocket.
+ *
+ * FAILS CLOSED, deliberately unlike [MainActivity.promptUnlock] and
+ * [MainActivity.promptE2eUnlock], which fall open so a device that can't
+ * authenticate never strands its owner. Here the safe answer is the opposite:
+ * no confirmation means no change. There's no lockout risk in doing so, because
+ * both cards are hidden entirely unless the device can authenticate.
+ */
+private fun confirmIdentity(
+    context: android.content.Context,
+    title: String,
+    onResult: (Boolean) -> Unit,
+) {
+    val activity = context.findActivity() as? FragmentActivity ?: return onResult(false)
+    val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or
+        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    val prompt = BiometricPrompt(
+        activity,
+        ContextCompat.getMainExecutor(activity),
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) =
+                onResult(true)
+            override fun onAuthenticationError(code: Int, err: CharSequence) = onResult(false)
+            // Not terminal — the prompt stays up for another attempt — so don't
+            // answer here or the setting would resolve on a bad fingerprint read.
+            override fun onAuthenticationFailed() = Unit
+        },
+    )
+    val info = BiometricPrompt.PromptInfo.Builder()
+        .setTitle(title)
+        .setSubtitle("Confirm it's you to change this setting")
+        .setAllowedAuthenticators(authenticators)
+        .build()
+    runCatching { prompt.authenticate(info) }.onFailure { onResult(false) }
 }
 
 @Composable
@@ -5121,9 +5174,20 @@ private fun E2eBiometricLockCard(prefs: Prefs) {
     var on by remember { mutableStateOf(prefs.e2eBiometricLock) }
     PrefToggleCard(
         title = "Lock encrypted channels",
-        subtitle = "Require an unlock to open a secure (E2E) channel; re-locks when you leave the app.",
+        subtitle = "Require an unlock to open a secure (E2E) channel; re-locks when you leave the app. " +
+            "Changing this asks first.",
         checked = on,
-    ) { on = it; prefs.e2eBiometricLock = it }
+    ) { want ->
+        confirmIdentity(
+            context,
+            title = if (want) "Turn on encrypted-channel lock" else "Turn off encrypted-channel lock",
+        ) { ok ->
+            if (ok) {
+                on = want
+                prefs.e2eBiometricLock = want
+            }
+        }
+    }
 }
 
 @Composable
