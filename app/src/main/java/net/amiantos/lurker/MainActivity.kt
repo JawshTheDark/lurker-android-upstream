@@ -1566,6 +1566,7 @@ private fun BufferListBody(
                                     client.presenceState(buffer.networkId, buffer.target).orEmpty()
                                 } else null,
                                 label = if (isFriendRow) client.friendDisplayName(buffer) else null,
+                                networkName = buffer.networkId?.let { client.networkName(it) },
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
@@ -1717,6 +1718,10 @@ private fun BufferRow(
      *  unknown, or null for a row that shows no presence dot at all. */
     presence: String? = null,
     label: String? = null,
+    /** Network name to show under the row (Pinned/Friends/queries), resolved LIVE
+     *  by the caller — buffer.networkName is frozen at creation and reads "network"
+     *  for a buffer made before its network name arrived. Falls back to that field. */
+    networkName: String? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onToggleMute: (() -> Unit)? = null,
@@ -1786,9 +1791,10 @@ private fun BufferRow(
             // The Pinned section flattens across networks, so a bare "#foo" is
             // ambiguous when the same channel is joined on several networks —
             // tag each pinned row with its network.
-            if (showNetwork && buffer.networkName.isNotBlank()) {
+            val netLabel = (networkName ?: buffer.networkName).takeIf { it.isNotBlank() && it != "network" }
+            if (showNetwork && netLabel != null) {
                 Text(
-                    buffer.networkName,
+                    netLabel,
                     color = TextSecondary,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 1.dp),
@@ -2128,7 +2134,7 @@ private fun ChatScreen(
             onDismissRequest = { joinPrompt = null },
             containerColor = SurfaceRaised,
             title = { Text("Join $chan?", color = TextPrimary) },
-            text = { Text("Join the channel on ${buffer.networkName}?", color = TextSecondary) },
+            text = { Text("Join the channel on ${buffer.networkId?.let { client.networkName(it) } ?: buffer.networkName}?", color = TextSecondary) },
             confirmButton = {
                 TextButton(onClick = {
                     joinPrompt = null
@@ -3630,7 +3636,8 @@ private fun MultichanScreen(
             ) {
                 items(feed.size) { i ->
                     val (buf, m) = feed[i]
-                    val label = "${buf.networkName} · ${buf.displayName}"
+                    val netName = buf.networkId?.let { client.networkName(it) } ?: buf.networkName
+                    val label = "$netName · ${buf.displayName}"
                     if (Ui.multichanCompact) {
                         MultichanCompactRow(m, label, baseSize, openLink) { onOpenSource(buf, m.id) }
                     } else {
