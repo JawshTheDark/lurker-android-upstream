@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Background video surface. texture_view (not the default surface_view) so the
+     frosted top bar / composer can actually blur the video behind them — a
+     SurfaceView punches a hole the Haze blur can't sample. resize_mode="zoom" is
+     cover-crop, matching ContentScale.Crop used for image backgrounds. -->
+<androidx.media3.ui.PlayerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view"
+    app:use_controller="false"
+    app:resize_mode="zoom"
+    app:shutter_background_color="@android:color/transparent" />

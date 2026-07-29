@@ -87,6 +87,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1107,13 +1108,9 @@ private fun ChannelControlPanel(
                 // channel; "None here" hides it even if a global one is set).
                 val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
                     if (uri != null) {
-                        runCatching {
-                            val dir = panelCtx.filesDir
-                            val safe = buffer.key.replace(Regex("[^A-Za-z0-9]"), "_")
-                            dir.listFiles { f -> f.name.startsWith("ch_bg_${safe}_") }?.forEach { it.delete() }
-                            val dst = File(dir, "ch_bg_${safe}_${System.currentTimeMillis()}.jpg")
-                            panelCtx.contentResolver.openInputStream(uri)?.use { i -> dst.outputStream().use { i.copyTo(it) } }
-                            Ui.backgroundOverrides[buffer.key] = dst.absolutePath
+                        val safe = buffer.key.replace(Regex("[^A-Za-z0-9]"), "_")
+                        saveBackgroundPick(panelCtx, uri, "ch_bg_${safe}_")?.let {
+                            Ui.backgroundOverrides[buffer.key] = it
                             Prefs(panelCtx).backgroundOverrides = Ui.backgroundOverrides.toMap()
                         }
                     }
@@ -1122,8 +1119,8 @@ private fun ChannelControlPanel(
                     Text("CHANNEL BACKGROUND", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                     fun persistBg() { Prefs(panelCtx).backgroundOverrides = Ui.backgroundOverrides.toMap() }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        PanelActionChip("Set image") {
-                            bgPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        PanelActionChip("Set image / video") {
+                            bgPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                         }
                         PanelActionChip("None here") { Ui.backgroundOverrides[buffer.key] = ""; persistBg() }
                         if (buffer.key in Ui.backgroundOverrides) {
@@ -2288,12 +2285,7 @@ private fun ChatScreen(
         // bar and composer blur it, and messages layer on top at zIndex 1.
         val bgPath = Ui.backgroundFor(buffer.key)
         if (bgPath != null) {
-            AsyncImage(
-                model = File(bgPath),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 0f),
-            )
+            ChatBackground(bgPath, Modifier.fillMaxSize().hazeSource(hazeState, zIndex = 0f))
             Box(Modifier.fillMaxSize().background(CanvasBlack.copy(alpha = Ui.backgroundDim)))
         } else {
             AmbientBackground(Modifier.hazeSource(hazeState, zIndex = 0f))
@@ -5007,27 +4999,104 @@ private fun NickColorsCard(prefs: Prefs) {
     }
 }
 
+/**
+ * The chat background: a still image, an animated GIF/WebP, or a looping video.
+ *
+ * Images (including animated ones — the app-wide Coil loader has the animated
+ * decoder) go through AsyncImage. Videos play muted, looping, cover-cropped, on a
+ * texture surface so the frosted chrome above can blur them. Paused while the app
+ * is away so a full-screen loop doesn't drain the battery in your pocket.
+ */
+@Composable
+private fun ChatBackground(path: String, modifier: Modifier = Modifier) {
+    val isVideo = VIDEO_EXTS.any { path.endsWith(it, ignoreCase = true) }
+    if (!isVideo) {
+        AsyncImage(
+            model = File(path),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+        return
+    }
+    val context = LocalContext.current
+    val player = remember(path) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
+            repeatMode = Player.REPEAT_MODE_ONE
+            volume = 0f // a chat background is never audible
+            prepare()
+            playWhenReady = true
+        }
+    }
+    // Follow the app's foreground state: keep the loop off-screen work to nothing
+    // while backgrounded, and its own DisposableEffect releases the player.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> player.playWhenReady = false
+                androidx.lifecycle.Lifecycle.Event.ON_START -> player.playWhenReady = true
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs); player.release() }
+    }
+    AndroidView(
+        factory = { ctx ->
+            (android.view.LayoutInflater.from(ctx).inflate(R.layout.chat_bg_player, null) as PlayerView)
+                .also { it.player = player }
+        },
+        modifier = modifier,
+    )
+}
+
+/**
+ * Copy a picked image/video into app storage as the (global or per-channel)
+ * background, replacing any previous file under [prefix]. Returns the saved path,
+ * or null if the pick couldn't be read. The extension is derived from the MIME
+ * type so [ChatBackground] can tell a video from an image later.
+ */
+private fun saveBackgroundPick(
+    context: android.content.Context,
+    uri: android.net.Uri,
+    prefix: String,
+): String? = runCatching {
+    val mime = context.contentResolver.getType(uri).orEmpty()
+    val ext = when {
+        mime.startsWith("video/") && mime.contains("webm") -> ".webm"
+        mime.startsWith("video/") -> ".mp4" // ExoPlayer sniffs the real container
+        mime == "image/gif" -> ".gif"
+        mime == "image/webp" -> ".webp"
+        mime == "image/png" -> ".png"
+        else -> ".jpg"
+    }
+    val dir = context.filesDir
+    dir.listFiles { f -> f.name.startsWith(prefix) }?.forEach { it.delete() }
+    val dst = File(dir, "$prefix${System.currentTimeMillis()}$ext")
+    context.contentResolver.openInputStream(uri)?.use { i -> dst.outputStream().use { i.copyTo(it) } }
+        ?: return null
+    dst.absolutePath
+}.getOrNull()
+
 @Composable
 private fun ChatBackgroundCard(prefs: Prefs) {
     val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            runCatching {
-                val dir = context.filesDir
-                dir.listFiles { f -> f.name.startsWith("chat_bg_") }?.forEach { it.delete() }
-                val dst = File(dir, "chat_bg_${System.currentTimeMillis()}.jpg")
-                context.contentResolver.openInputStream(uri)?.use { input -> dst.outputStream().use { input.copyTo(it) } }
-                Ui.backgroundUri = dst.absolutePath
-                prefs.backgroundUri = dst.absolutePath
+            saveBackgroundPick(context, uri, "chat_bg_")?.let {
+                Ui.backgroundUri = it
+                prefs.backgroundUri = it
             }
         }
     }
     AppearanceCard {
         Text("Chat background", fontSize = 17.sp)
-        Text("Use a photo from your device behind your chats.", color = TextSecondary, fontSize = 12.sp)
+        Text("Use a photo, GIF, or short video from your device behind your chats.", color = TextSecondary, fontSize = 12.sp)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
-                Text(if (Ui.backgroundUri == null) "Choose image" else "Change image", color = AccentBlue)
+            TextButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }) {
+                Text(if (Ui.backgroundUri == null) "Choose image / video" else "Change", color = AccentBlue)
             }
             if (Ui.backgroundUri != null) {
                 TextButton(onClick = { Ui.backgroundUri = null; prefs.backgroundUri = null }) {
