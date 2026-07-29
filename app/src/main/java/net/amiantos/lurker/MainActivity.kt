@@ -613,6 +613,12 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         client.onForeground()
+        // Revive the background anchor on every foreground, not just a cold start:
+        // Android 15+ stops it when the dataSync daily budget runs out, and simply
+        // resuming a still-alive Activity wouldn't otherwise restart it. Safe to
+        // call when it's already running (idempotent) or still out of budget (the
+        // service catches the refused start and stands down without crashing).
+        if (prefs.backgroundConnect && prefs.hasSession) LurkerConnectionService.start(this)
         // Re-lock only after a real trip away (>2s), so a rotation/layout switch
         // doesn't re-prompt. First launch: backgroundedAt is 0 → treated as away.
         if (prefs.biometricLock) {

@@ -58,14 +58,41 @@ class LurkerConnectionService : Service() {
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIF_ID, notif)
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIF_ID, notif)
+            }
+        } catch (e: Exception) {
+            // Android 15+ caps a dataSync foreground service at ~6h per 24h. Once
+            // that budget is spent, startForeground throws
+            // ForegroundServiceStartNotAllowedException — and the OS's own
+            // START_STICKY restarts kept walking straight back into it, so the app
+            // crash-looped overnight. Stop cleanly instead of crashing; the anchor
+            // simply isn't up this round and comes back on the next foreground,
+            // when the rolling budget has room again. START_NOT_STICKY so the OS
+            // doesn't immediately retry into the same wall.
+            DebugLog.e("service", "startForeground refused (${e.javaClass.simpleName}); standing down")
+            stopSelf()
+            return START_NOT_STICKY
         }
         // If the OS kills us for memory, come back when it can — the app being
         // installed with backgroundConnect on means the user wants us alive.
         return START_STICKY
+    }
+
+    /**
+     * Android 15+ dataSync time limit reached (API 35+). The OS gives us a few
+     * seconds to stop before it force-crashes us with
+     * ForegroundServiceDidNotStopInTimeException — which is exactly what it was
+     * doing. Stand down gracefully; background notifications resume the next time
+     * the app is foregrounded and the daily budget has refreshed.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        DebugLog.w("service", "dataSync time limit reached; stopping before the OS kills us")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     override fun onDestroy() {
