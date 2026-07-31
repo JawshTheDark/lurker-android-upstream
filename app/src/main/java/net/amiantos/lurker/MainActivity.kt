@@ -2183,6 +2183,12 @@ private fun ChatScreen(
     // position), the moment its rows populate. After that, live messages only
     // follow the tail if you're already at the bottom — so you never fight it.
     var openScrollDone by remember(buffer.key) { mutableStateOf(false) }
+    // Armed when YOU send a message: your own line echoes back from the server a
+    // beat later, and the plain at-bottom tail-follow can miss it (the echo lands
+    // on a frame where atBottom reads false), leaving your message below the fold
+    // behind the composer while the view sits on the last OTHER message. This
+    // one-shot forces the scroll to your line when it arrives, then disarms.
+    var followSelfSend by remember(buffer.key) { mutableStateOf(false) }
     // A tapped notification asks to jump to a specific message; flash it briefly so
     // the eye lands on it. Reset when the buffer or requested id changes.
     var scrolledToTarget by remember(buffer.key, scrollToMsgId) { mutableStateOf(false) }
@@ -2229,6 +2235,15 @@ private fun ChatScreen(
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
+        // Your own just-sent line: always follow it to the bottom, regardless of
+        // the atBottom slack, then disarm. This is the deterministic half of the
+        // send scroll — repinToTail handles the instant jump, this catches the
+        // async echo so your message is never stranded under the composer.
+        if (followSelfSend) {
+            listState.scrollToItem(rows.lastIndex + headerCount)
+            followSelfSend = false
+            return@LaunchedEffect
+        }
         // Never follow the tail while the user is actively scrolling — otherwise a
         // fling that's still within the atBottom slack gets yanked back down by the
         // next append, which on a busy channel repeats and traps them at the bottom.
@@ -2604,6 +2619,11 @@ private fun ChatScreen(
                             // fold with nothing to say it arrived.
                             val wasMessage = parsed.ops.all { it.type in SENDABLE_OPS }
                             if (!keepPositionOnSend || !wasMessage) repinToTail()
+                            // A sent message echoes back asynchronously; arm the
+                            // one-shot so the scroll lands on YOUR line once it does.
+                            // (Commands append synchronously, so repinToTail already
+                            // caught them — no echo to wait for.)
+                            if (wasMessage && !keepPositionOnSend) followSelfSend = true
                         }
                         // Local command output (/help and friends) is id-less too.
                         is ParsedInput.Local -> { client.localNotice(buffer, parsed.message); repinToTail() }
