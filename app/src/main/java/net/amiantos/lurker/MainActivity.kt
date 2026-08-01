@@ -290,26 +290,46 @@ class MainActivity : FragmentActivity() {
         pendingCallStart = null
     }
 
+    // Camera is requested only when you actually turn video on in a call — so an
+    // audio call never asks, and the prompt appears at the moment it makes sense.
+    private val cameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) CallController.toggleCamera() }
+
+    /** Toggle the call camera, requesting CAMERA the first time it's turned on. */
+    fun toggleCallCamera() {
+        if (!CallController.canToggleCamera()) return
+        if (CallController.cameraEnabled) { // turning OFF needs no permission
+            CallController.toggleCamera()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            CallController.toggleCamera()
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
     /** Start or join the voice/video call for [buffer]. Requests the mic (and, for
      *  video, camera) first, then has the server mint a LiveKit token and hands it
      *  to [CallController]. Called from the chat header / call badge. */
     fun startCall(buffer: Buffer, withVideo: Boolean) {
         val networkId = buffer.networkId ?: return
         if (CallController.inCall) return
+        val tgt = CallTarget(networkId, buffer.target, buffer.displayName)
         val go = {
+            // Show the call area immediately, in a "Connecting…" state, so pressing
+            // the button takes you there right away rather than after the token
+            // round-trip.
+            CallController.beginConnecting(tgt)
             client.requestVoiceToken(networkId, buffer.target) { tok, err ->
-                if (tok != null) {
-                    CallController.join(this, tok, CallTarget(networkId, buffer.target, buffer.displayName), withVideo)
-                } else {
-                    client.localNotice(buffer, "Couldn't start the call: ${err ?: "unavailable"}")
-                }
+                if (tok != null) CallController.join(this, tok, tgt, withVideo)
+                else CallController.failStart(err ?: "call unavailable")
             }
         }
-        val needed = if (withVideo) {
-            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
-        } else {
-            arrayOf(Manifest.permission.RECORD_AUDIO)
-        }
+        // Mic is required to start; camera is requested lazily when you turn video
+        // on inside the call (see toggleCallCamera), so audio calls never prompt for it.
+        val needed = arrayOf(Manifest.permission.RECORD_AUDIO)
         val granted = needed.all {
             checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED
         }
@@ -630,6 +650,7 @@ class MainActivity : FragmentActivity() {
                         CallScreen(
                             onMinimize = { callMinimized = true },
                             onModerate = { moderateTarget = it },
+                            onToggleCamera = { toggleCallCamera() },
                             canModerate = canModerate,
                         )
                     }

@@ -53,21 +53,44 @@ object CallController {
     var error by mutableStateOf<String?>(null)
     val participants = mutableStateListOf<CallParticipant>()
 
-    val inCall: Boolean get() = room != null
+    /** Whether the call UI should be shown — OBSERVABLE, so the overlay appears the
+     *  instant a call starts. (The room handle below is a plain field; gating on it
+     *  wouldn't recompose, which left the call screen hidden until you navigated.) */
+    var active by mutableStateOf(false)
+        private set
+
+    val inCall: Boolean get() = active
 
     private var room: Room? = null
     private var scope: CoroutineScope? = null
     private val speaking = mutableSetOf<String>()
 
-    /** Join [tgt]'s call with the server-minted [tok]. No-op if already in a call. */
-    fun join(context: Context, tok: VoiceToken, tgt: CallTarget, withVideo: Boolean) {
-        if (inCall) return
-        val app = context.applicationContext
+    /** Show the call UI in a connecting state BEFORE the token round-trip, so
+     *  pressing the call button takes you straight to the call area. */
+    fun beginConnecting(tgt: CallTarget) {
         target = tgt
+        active = true
         connecting = true
         error = null
-        cameraEnabled = false
         micEnabled = true
+        cameraEnabled = false
+        participants.clear()
+    }
+
+    /** Token mint / connect failed before we had media. Keep the sheet up with the
+     *  error and a working leave button, rather than vanishing silently. */
+    fun failStart(msg: String) {
+        error = msg
+        connecting = false
+    }
+
+    /** Join [tgt]'s call with the server-minted [tok]. No-op if already connected. */
+    fun join(context: Context, tok: VoiceToken, tgt: CallTarget, withVideo: Boolean) {
+        if (room != null) return
+        val app = context.applicationContext
+        if (!active) beginConnecting(tgt) else target = tgt
+        connecting = true
+        error = null
         val r = LiveKit.create(app)
         room = r
         val s = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -94,8 +117,11 @@ object CallController {
                 refresh(r)
             } catch (e: Exception) {
                 DebugLog.e("call", "join failed: ${e.message}")
-                error = e.message ?: "couldn't join the call"
-                leave(app)
+                // Tear down the half-open room but KEEP the sheet up showing the
+                // error, so the user sees why and can dismiss it themselves.
+                room?.disconnect(); room = null
+                CallService.stop(app)
+                failStart(e.message ?: "couldn't join the call")
             }
         }
     }
@@ -114,6 +140,10 @@ object CallController {
         scope?.launch { runCatching { r.localParticipant.setCameraEnabled(next); refresh(r) } }
     }
 
+    /** Grant a chance to open the camera: request from the UI first — LiveKit can't
+     *  publish video without CAMERA. Returns whether a room is live to publish to. */
+    fun canToggleCamera(): Boolean = room != null
+
     fun leave(context: Context) {
         room?.disconnect()
         room = null
@@ -122,6 +152,7 @@ object CallController {
         speaking.clear()
         participants.clear()
         target = null
+        active = false
         connecting = false
         cameraEnabled = false
         CallService.stop(context.applicationContext)

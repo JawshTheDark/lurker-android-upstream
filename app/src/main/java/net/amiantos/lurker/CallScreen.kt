@@ -48,7 +48,12 @@ import net.amiantos.lurker.ui.theme.TextSecondary
  * chat screen you were on and the call persists as you navigate.
  */
 @Composable
-fun CallScreen(onMinimize: () -> Unit, onModerate: (CallParticipant) -> Unit, canModerate: Boolean) {
+fun CallScreen(
+    onMinimize: () -> Unit,
+    onModerate: (CallParticipant) -> Unit,
+    onToggleCamera: () -> Unit,
+    canModerate: Boolean,
+) {
     val ctl = CallController
     val context = LocalContext.current
     Column(
@@ -93,7 +98,7 @@ fun CallScreen(onMinimize: () -> Unit, onModerate: (CallParticipant) -> Unit, ca
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CircleControl(if (ctl.micEnabled) "🎤" else "🔇", TextPrimary, if (ctl.micEnabled) Color(0x22FFFFFF) else AlertRed) { ctl.toggleMic() }
-            CircleControl(if (ctl.cameraEnabled) "📹" else "📷", TextPrimary, if (ctl.cameraEnabled) OnlineGreen else Color(0x22FFFFFF)) { ctl.toggleCamera() }
+            CircleControl(if (ctl.cameraEnabled) "📹" else "📷", TextPrimary, if (ctl.cameraEnabled) OnlineGreen else Color(0x22FFFFFF)) { onToggleCamera() }
             CircleControl("✕", Color.White, AlertRed) { ctl.leave(context) }
         }
     }
