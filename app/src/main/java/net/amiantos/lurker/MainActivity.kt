@@ -2353,6 +2353,11 @@ private fun ChatScreen(
     // history grows the list without moving the newest message.
     val tailSig = messages.lastOrNull()?.let { it.id to it.text.length }
     LaunchedEffect(tailSig) {
+        // Closing/parting a buffer empties the rows: lastIndex is then -1 and
+        // scrollToItem(-1) throws. Bail before any pinning when there's nothing
+        // to pin to (also disarms a pending self-send follow so it can't fire
+        // against the next buffer).
+        if (rows.isEmpty()) { followSelfSend = false; return@LaunchedEffect }
         // Your own just-sent line: always follow it to the bottom, regardless of
         // the atBottom slack, then disarm. This is the deterministic half of the
         // send scroll — repinToTail handles the instant jump, this catches the
@@ -2372,6 +2377,7 @@ private fun ChatScreen(
     // An image resizing its card mustn't shove the tail out from under a reader
     // who's sitting at the bottom — re-pin when one loads (but not mid-scroll).
     LaunchedEffect(mediaTick) {
+        if (rows.isEmpty()) return@LaunchedEffect
         if (mediaTick > 0 && openScrollDone && anchorId == null && atBottom && !listState.isScrollInProgress) {
             listState.scrollToItem(rows.lastIndex + headerCount)
         }
