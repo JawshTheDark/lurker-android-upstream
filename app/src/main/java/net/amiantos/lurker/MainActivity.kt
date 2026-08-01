@@ -280,6 +280,42 @@ class MainActivity : FragmentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { /* declining is fine — the socket + badges still work, just no notifications */ }
 
+    // Runs the queued call join once the mic (and camera, for video) permission is
+    // granted; dropped if the user declines.
+    private var pendingCallStart: (() -> Unit)? = null
+    private val callPermission = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants[Manifest.permission.RECORD_AUDIO] == true) pendingCallStart?.invoke()
+        pendingCallStart = null
+    }
+
+    /** Start or join the voice/video call for [buffer]. Requests the mic (and, for
+     *  video, camera) first, then has the server mint a LiveKit token and hands it
+     *  to [CallController]. Called from the chat header / call badge. */
+    fun startCall(buffer: Buffer, withVideo: Boolean) {
+        val networkId = buffer.networkId ?: return
+        if (CallController.inCall) return
+        val go = {
+            client.requestVoiceToken(networkId, buffer.target) { tok, err ->
+                if (tok != null) {
+                    CallController.join(this, tok, CallTarget(networkId, buffer.target, buffer.displayName), withVideo)
+                } else {
+                    client.localNotice(buffer, "Couldn't start the call: ${err ?: "unavailable"}")
+                }
+            }
+        }
+        val needed = if (withVideo) {
+            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+        } else {
+            arrayOf(Manifest.permission.RECORD_AUDIO)
+        }
+        val granted = needed.all {
+            checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (granted) go() else { pendingCallStart = go; callPermission.launch(needed) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -575,6 +611,49 @@ class MainActivity : FragmentActivity() {
                         onBack = { back() },
                     )
                 }
+                }
+                // Voice/video call overlay (lurker#680): a top-level sibling of the
+                // nav, so it draws above whatever screen you're on. Full-screen
+                // while live; a slim strip when minimized so you can keep chatting.
+                var callMinimized by remember { mutableStateOf(false) }
+                var moderateTarget by remember { mutableStateOf<CallParticipant?>(null) }
+                LaunchedEffect(CallController.inCall) { if (!CallController.inCall) callMinimized = false }
+                if (CallController.inCall) {
+                    val tgt = CallController.target
+                    val callBuffer = tgt?.let { t ->
+                        client.buffers.firstOrNull { it.networkId == t.networkId && it.target.equals(t.target, true) }
+                    }
+                    val canModerate = callBuffer?.let { client.myMember(it)?.canModerate } ?: false
+                    if (callMinimized) {
+                        ReturnToCallBar(onExpand = { callMinimized = false })
+                    } else {
+                        CallScreen(
+                            onMinimize = { callMinimized = true },
+                            onModerate = { moderateTarget = it },
+                            canModerate = canModerate,
+                        )
+                    }
+                }
+                moderateTarget?.let { p ->
+                    val tgt = CallController.target
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { moderateTarget = null },
+                        containerColor = SurfaceDark,
+                        title = { Text(p.name, color = TextPrimary) },
+                        text = { Text("Moderate this participant in the call.", color = TextSecondary) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                tgt?.let { client.moderateCall(it.networkId, it.target, p.identity, "remove") }
+                                moderateTarget = null
+                            }) { Text("Remove", color = AlertRed) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                tgt?.let { client.moderateCall(it.networkId, it.target, p.identity, "mute") }
+                                moderateTarget = null
+                            }) { Text("Mute", color = AccentBlue) }
+                        },
+                    )
                 }
             }
         }
@@ -1567,6 +1646,7 @@ private fun BufferListBody(
                                 } else null,
                                 label = if (isFriendRow) client.friendDisplayName(buffer) else null,
                                 networkName = buffer.networkId?.let { client.networkName(it) },
+                                callCount = client.callPresence[buffer.key] ?: 0,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
@@ -1722,6 +1802,8 @@ private fun BufferRow(
      *  by the caller — buffer.networkName is frozen at creation and reads "network"
      *  for a buffer made before its network name arrived. Falls back to that field. */
     networkName: String? = null,
+    /** Live participants in this row's call, 0 = no call (lurker#680). */
+    callCount: Int = 0,
     onTogglePin: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onToggleMute: (() -> Unit)? = null,
@@ -1809,6 +1891,21 @@ private fun BufferRow(
         }
         if (hasDraft) {
             Text("✎", color = TextSecondary, fontSize = 14.sp)
+            Spacer(Modifier.width(8.dp))
+        }
+        // Live call in this channel/DM (lurker#680).
+        if (callCount > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(OnlineGreen.copy(alpha = 0.18f))
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
+            ) {
+                Text("📞", fontSize = 11.sp)
+                Spacer(Modifier.width(3.dp))
+                Text("$callCount", color = OnlineGreen, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
             Spacer(Modifier.width(8.dp))
         }
         if (unread > 0) {
@@ -2494,6 +2591,23 @@ private fun ChatScreen(
                     }
                 },
                 actions = {
+                    // Start/join the voice+video call for this channel/DM (lurker#680).
+                    // Only when the server has calling on and we're on a real network.
+                    if (client.voiceEnabled && buffer.networkId != null && !buffer.isServerBuffer) {
+                        val inCall = client.callPresence[buffer.key] ?: 0
+                        val ctx = LocalContext.current
+                        TextButton(onClick = {
+                            (ctx.findActivity() as? MainActivity)?.startCall(buffer, withVideo = false)
+                        }) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("📞", fontSize = 16.sp, color = if (inCall > 0) OnlineGreen else TextSecondary)
+                                if (inCall > 0) {
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("$inCall", color = OnlineGreen, fontSize = 15.sp)
+                                }
+                            }
+                        }
+                    }
                     if (buffer.isChannel && showMembersButton) {
                         val count = client.members[buffer.key]?.size ?: 0
                         TextButton(onClick = { showMembers = true }) {

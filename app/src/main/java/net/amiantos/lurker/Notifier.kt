@@ -101,11 +101,23 @@ object Notifier {
             R.drawable.ic_stat_notification, "Reply", action(ACTION_REPLY, idBase * 31 + 1, mutable = true),
         ).addRemoteInput(replyInput).setAllowGeneratedReplies(true).build()
 
+        // MessagingStyle + CATEGORY_MESSAGE: Wear OS treats these as conversations,
+        // renders them far better on the wrist, and bridges them more reliably than
+        // a plain notification. (setLocalOnly is deliberately NOT set — that would
+        // stop it reaching the watch at all.) The channel keeps its title as the
+        // conversation name; the sender is the Person.
+        val self = androidx.core.app.Person.Builder().setName("You").build()
+        val sender = androidx.core.app.Person.Builder().setName(e.nick).build()
+        val style = NotificationCompat.MessagingStyle(self)
+            .setConversationTitle(if (e.isDm) null else e.target)
+            .addMessage(body.take(400), System.currentTimeMillis(), sender)
         val notif = NotificationCompat.Builder(context, if (e.isDm) CHANNEL_DMS else CHANNEL_MENTIONS)
             .setSmallIcon(R.drawable.ic_stat_notification)
             .setContentTitle(title)
             .setContentText(body.take(200))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(400)))
+            .setStyle(style)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setLocalOnly(false)
             .setAutoCancel(true)
             .setContentIntent(pi)
             .addAction(replyAction)
