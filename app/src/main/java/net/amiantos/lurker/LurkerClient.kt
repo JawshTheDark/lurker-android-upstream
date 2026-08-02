@@ -2774,14 +2774,20 @@ open class LurkerClient {
 
     /** IRC glob match (`*` any run, `?` one char, case-insensitive). A bare-nick
      *  mask (no ! or @) matches the nick; a full mask matches nick!user@host. */
+    // Compiled masks memoized by pattern — a mute rule is re-tested against many
+    // messages, so we compile each glob once instead of per candidate line.
+    private val maskRegexCache = HashMap<String, Regex?>()
+
     private fun ircMaskMatches(mask: String, userhost: String?, nick: String?): Boolean {
-        val rx = runCatching {
-            Regex(
-                "(?i)" + mask.map {
-                    when (it) { '*' -> ".*"; '?' -> "."; else -> Regex.escape(it.toString()) }
-                }.joinToString(""),
-            )
-        }.getOrNull() ?: return false
+        val rx = maskRegexCache.getOrPut(mask) {
+            runCatching {
+                Regex(
+                    "(?i)" + mask.map {
+                        when (it) { '*' -> ".*"; '?' -> "."; else -> Regex.escape(it.toString()) }
+                    }.joinToString(""),
+                )
+            }.getOrNull()
+        } ?: return false
         val bareNick = !mask.contains('!') && !mask.contains('@')
         val subject = if (bareNick) (nick ?: userhost) else (userhost ?: nick)
         return subject != null && rx.matches(subject)

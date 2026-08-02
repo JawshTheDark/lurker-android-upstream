@@ -1644,6 +1644,17 @@ private fun BufferListBody(
                             // friend buffer is unclosable — closing would just collapse
                             // it back to this same row).
                             val isFriendRow = section.network == "Friends"
+                            // Cache the E2E history scan (up to 150 msgs) per row, so a
+                            // buffer-list recompose (unread/pin/presence ticks) doesn't
+                            // re-scan every buffer's history every frame. Recomputes only
+                            // when this buffer's message list or its known-E2E flag moves.
+                            val bufMsgs = client.messagesByBuffer[buffer.key]
+                            val bufSeenE2e = buffer.key in client.e2eSeen
+                            val e2eFlag = remember(bufMsgs, bufSeenE2e) {
+                                bufMsgs?.takeIf { it.isNotEmpty() }
+                                    ?.let { m -> m.asReversed().take(150).any { it.e2e } }
+                                    ?: bufSeenE2e
+                            }
                             BufferRow(
                                 buffer = buffer,
                                 unread = client.unread[buffer.key] ?: 0,
@@ -1654,14 +1665,8 @@ private fun BufferListBody(
                                 muted = client.isNotifyMuted(buffer),
                                 showNetwork = section.network == "★ Pinned" || isFriendRow ||
                                     section.network == "💬 New queries",
-                                // Green lock, matching the chat header. Prefer loaded
-                                // history (self-correcting if E2E is turned off); fall
-                                // back to the persisted known-E2E set for buffers whose
-                                // history hasn't loaded yet (fresh launch, unopened).
-                                e2e = client.messagesByBuffer[buffer.key]
-                                    ?.takeIf { it.isNotEmpty() }
-                                    ?.let { m -> m.asReversed().take(150).any { it.e2e } }
-                                    ?: (buffer.key in client.e2eSeen),
+                                // Green lock, matching the chat header (see e2eFlag above).
+                                e2e = e2eFlag,
                                 // "" (not null) when unknown: the row still shows a
                                 // dot, greyed, rather than dropping it entirely.
                                 presence = if (isFriendRow) {
@@ -2229,18 +2234,23 @@ private fun ChatScreen(
     var joinPrompt by remember { mutableStateOf<String?>(null) }
     // Tapping a #channel in any message offers to join it (freakyy85). Null on
     // the :system: buffer, which has no network to join on.
-    val chanTap: ((String) -> Unit)? =
-        if (buffer.networkId != null) ({ chan -> joinPrompt = chan }) else null
+    val chanTap: ((String) -> Unit)? = remember(buffer.networkId != null) {
+        if (buffer.networkId != null) ({ chan: String -> joinPrompt = chan }) else null
+    }
     var viewerUrl by remember { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
     // Route taps: images open the in-app viewer, av media goes to the system
-    // player picker, everything else to the browser.
-    val openLink: (String) -> Unit = { url ->
-        val clean = url.substringBefore('?').substringBefore('#').lowercase()
-        if ((IMAGE_EXTS + MEDIA_EXTS).any { clean.endsWith(it) }) {
-            viewerUrl = url
-        } else {
-            uriHandler.openUri(url)
+    // player picker, everything else to the browser. Remembered so it's a stable
+    // instance across recompositions — every message row takes it as a param, and a
+    // fresh lambda each recompose would needlessly re-run them.
+    val openLink: (String) -> Unit = remember(uriHandler) {
+        { url ->
+            val clean = url.substringBefore('?').substringBefore('#').lowercase()
+            if ((IMAGE_EXTS + MEDIA_EXTS).any { clean.endsWith(it) }) {
+                viewerUrl = url
+            } else {
+                uriHandler.openUri(url)
+            }
         }
     }
 
@@ -2299,9 +2309,14 @@ private fun ChatScreen(
     LaunchedEffect(atBottom) {
         awaySinceId = if (atBottom) null else (messages.lastOrNull { it.id > 0 }?.id ?: 0L)
     }
-    val missed = awaySinceId?.let { since ->
-        messages.count { it.id > since && !it.system && !it.self }
-    } ?: 0
+    // Cache this O(n) scan so it doesn't run on every ChatScreen recompose (typing,
+    // media ticks, …). `messages` is a plain local re-derived each recompose (not
+    // snapshot state), so derivedStateOf would capture a stale ref — key on cheap
+    // signals instead: the count only moves when a message arrives (size grows) or
+    // the away-anchor flips.
+    val missed = remember(messages.size, awaySinceId) {
+        awaySinceId?.let { since -> messages.count { it.id > since && !it.system && !it.self } } ?: 0
+    }
 
     // Opening a buffer lands at the newest message ONCE (regardless of scroll
     // position), the moment its rows populate. After that, live messages only
@@ -2474,7 +2489,11 @@ private fun ChatScreen(
                     }
                 }
             }
-            items(rows.size) { i ->
+            // Stable keys so "load older" (a PREPEND) doesn't renumber every row and
+            // force a full re-layout of the viewport. Real messages key on their id;
+            // the divider and any not-yet-acked optimistic/local rows (id <= 0) fall
+            // back to position, which stays unique and can't collide with an "m<id>".
+            items(rows.size, key = { i -> rowMsgId(rows[i]).let { if (it > 0) "m$it" else "row-$i" } }) { i ->
                 val compact = Ui.compactFor(buffer.key)
                 when (val row = rows[i]) {
                     is ChatRow.Bubble -> if (compact) {
@@ -3537,7 +3556,15 @@ private fun MessageBubble(
                 )
                 .padding(horizontal = 13.dp, vertical = vPad),
         ) {
-            val body = mircAnnotated(msg.text, if (self) Color.White else AccentBlue, onLink, onChannel)
+            // mIRC parse + URL/channel regex is the per-row hot path — cache it so a
+            // ChatScreen recomposition (typing, media load, unread ticks) doesn't
+            // re-parse every visible bubble. Keyed on everything that changes the
+            // output; the link/channel handlers are stable (remembered in ChatScreen),
+            // so their nullability is the only relevant input.
+            val linkColor = if (self) Color.White else AccentBlue
+            val body = remember(msg.text, linkColor, onLink != null, onChannel != null) {
+                mircAnnotated(msg.text, linkColor, onLink, onChannel)
+            }
             Text(
                 if (msg.type == "error") buildAnnotatedString {
                     withStyle(SpanStyle(color = AlertRed)) { append(body) }
@@ -3591,7 +3618,14 @@ private fun CompactMessageRow(
     val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
     val goldHighlight = !msg.self && paintedBg == null && (msg.matched || flash)
     val highlightBg = if (Ui.highlightColor != 0) Color(Ui.highlightColor) else HighlightGold
-    val time = formatTime(msg.time)
+    val time = remember(msg.time, Ui.clock24h) { formatTime(msg.time) }
+    val accent = AccentBlue
+    // Cache the regex-heavy mIRC parse so a ChatScreen recomposition doesn't
+    // re-parse every visible compact row (the buildAnnotatedString assembly below
+    // is cheap; the parse is not).
+    val body = remember(msg.text, accent, onLink != null, onChannel != null) {
+        mircAnnotated(msg.text, accent, onLink, onChannel)
+    }
     val line = buildAnnotatedString {
         if (time != null) {
             withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
@@ -3607,7 +3641,6 @@ private fun CompactMessageRow(
             withStyle(nickStyle) { append(msg.nick) }
         }
         append("  ")
-        val body = mircAnnotated(msg.text, AccentBlue, onLink, onChannel)
         when (msg.type) {
             "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
             "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }
@@ -3639,7 +3672,9 @@ private fun CompactMessageRow(
 /** Compact-mode CTCP ACTION ("* nick does thing"). */
 @Composable
 private fun CompactActionRow(msg: Msg, baseSize: Int, onLink: ((String) -> Unit)? = null) {
-    val time = formatTime(msg.time)
+    val time = remember(msg.time, Ui.clock24h) { formatTime(msg.time) }
+    val accent = AccentBlue
+    val body = remember(msg.text, accent, onLink != null) { mircAnnotated(msg.text, accent, onLink) }
     val line = buildAnnotatedString {
         if (time != null) {
             withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
@@ -3648,7 +3683,7 @@ private fun CompactActionRow(msg: Msg, baseSize: Int, onLink: ((String) -> Unit)
             append("* ")
             withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
             append(" ")
-            append(mircAnnotated(msg.text, AccentBlue, onLink))
+            append(body)
         }
     }
     Text(
@@ -3662,12 +3697,14 @@ private fun CompactActionRow(msg: Msg, baseSize: Int, onLink: ((String) -> Unit)
 
 @Composable
 private fun ActionLine(msg: Msg, baseSize: Int = 16, onLink: ((String) -> Unit)? = null) {
+    val accent = AccentBlue
+    val body = remember(msg.text, accent, onLink != null) { mircAnnotated(msg.text, accent, onLink) }
     val line = buildAnnotatedString {
         withStyle(SpanStyle(color = TextSecondary, fontStyle = FontStyle.Italic)) { append("* ") }
         withStyle(
             SpanStyle(color = nickColor(msg.nick), fontStyle = FontStyle.Italic, fontWeight = FontWeight.SemiBold),
         ) { append(msg.nick) }
-        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(" ") ; append(mircAnnotated(msg.text, AccentBlue, onLink)) }
+        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(" ") ; append(body) }
     }
     Text(
         line,
@@ -3895,8 +3932,10 @@ private fun MultichanBubbleRow(
                 .background(if (msg.matched) HighlightGold else SurfaceRaised, shape)
                 .padding(horizontal = 13.dp, vertical = vPad),
         ) {
+            val accent = AccentBlue
+            val body = remember(msg.text, accent, onLink != null) { mircAnnotated(msg.text, accent, onLink) }
             Text(
-                mircAnnotated(msg.text, AccentBlue, onLink),
+                body,
                 color = if (msg.type == "notice") NoticeAmber else TextPrimary,
                 fontSize = baseSize.sp,
                 fontFamily = Ui.chatFont,
@@ -3926,7 +3965,9 @@ private fun MultichanCompactRow(
     onLink: ((String) -> Unit)?,
     onOpen: () -> Unit,
 ) {
-    val time = formatTime(msg.time)
+    val time = remember(msg.time, Ui.clock24h) { formatTime(msg.time) }
+    val accent = AccentBlue
+    val body = remember(msg.text, accent, onLink != null) { mircAnnotated(msg.text, accent, onLink) }
     val line = buildAnnotatedString {
         if (time != null) {
             withStyle(SpanStyle(color = TextSecondary, fontSize = (baseSize - 4).sp)) { append("$time ") }
@@ -3935,7 +3976,6 @@ private fun MultichanCompactRow(
         withStyle(SpanStyle(color = TextSecondary)) { append("  ·  ") }
         withStyle(SpanStyle(color = nickColor(msg.nick), fontWeight = FontWeight.SemiBold)) { append(msg.nick) }
         append("  ")
-        val body = mircAnnotated(msg.text, AccentBlue, onLink)
         when (msg.type) {
             "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
             "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }

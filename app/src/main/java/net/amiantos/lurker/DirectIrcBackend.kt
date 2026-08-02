@@ -355,9 +355,14 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
             val reason = e.message.takeIf { it.isNotBlank() }
             val line = "$nick quit" + (reason?.let { " ($it)" } ?: "")
             buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
+                // Only the channels that actually held this nick changed. Skipping
+                // the rest avoids re-materialising + re-sorting the roster of every
+                // channel on the network for one quit — an O(channels x users) hit
+                // on netsplit quit bursts that also needlessly recomposed the UI.
                 val wasHere = members[b.key]?.any { it.nick.equals(nick, true) } == true
+                if (!wasHere) return@forEach
                 rebuildRoster(b.target)
-                if (wasHere) sysLine(b.target, line)
+                sysLine(b.target, line)
             }
         }
 
@@ -368,8 +373,9 @@ class DirectIrcBackend(appContext: Context) : LurkerClient() {
             val line = "$oldNick is now known as $newNick"
             buffers.filter { it.networkId == networkId && it.isChannel }.forEach { b ->
                 val wasHere = members[b.key]?.any { it.nick.equals(oldNick, true) } == true
+                if (!wasHere) return@forEach // untouched channel — don't rebuild its roster
                 rebuildRoster(b.target)
-                if (wasHere && !oldNick.equals(myNick(), true)) sysLine(b.target, line)
+                if (!oldNick.equals(myNick(), true)) sysLine(b.target, line)
             }
         }
 

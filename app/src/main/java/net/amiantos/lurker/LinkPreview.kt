@@ -77,8 +77,17 @@ data class LinkPreview(
  * remembered as empty, so a busy channel doesn't re-hammer the same dead link).
  */
 object LinkPreviews {
-    // Present+empty = fetched, nothing to show. Absent = not fetched yet.
-    private val cache = ConcurrentHashMap<String, Optional<LinkPreview>>()
+    // Present+empty = fetched, nothing to show. Absent = not fetched yet. Bounded
+    // LRU (access-order) so a long-lived process that scrolls past thousands of
+    // links can't grow the cache without limit; only DEFINITIVE outcomes are
+    // stored (see load) so a transient network blip doesn't poison a link forever.
+    private const val CACHE_CAP = 256
+    private val cache = java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<String, Optional<LinkPreview>>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Optional<LinkPreview>>?) =
+                size > CACHE_CAP
+        },
+    )
     private val locks = ConcurrentHashMap<String, Mutex>()
 
     // A realistic desktop UA — some sites (YouTube included) only serve full
@@ -109,12 +118,22 @@ object LinkPreviews {
         val mu = locks.getOrPut(url) { Mutex() }
         mu.withLock {
             cache[url]?.let { return it.orElse(null) }
-            val result = withContext(Dispatchers.IO) {
-                runCatching { if (youtube) fetchYouTube(url) else fetchOpenGraph(url) }.getOrNull()
+            // Separate a DEFINITIVE outcome (the server answered — even if the page
+            // has no OG tags) from a TRANSIENT failure (DNS/timeout/offline/5xx,
+            // surfaced as an IOException). Cache only the definitive one; leave a
+            // transient miss uncached so the preview can appear once the network
+            // recovers, instead of being dead until the app restarts.
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching { if (youtube) fetchYouTube(url) else fetchOpenGraph(url) }
             }
-            cache[url] = Optional.ofNullable(result)
             locks.remove(url)
-            return result
+            return if (outcome.isSuccess) {
+                val preview = outcome.getOrNull()
+                cache[url] = Optional.ofNullable(preview)
+                preview
+            } else {
+                null // transient — don't cache; a later view retries
+            }
         }
     }
 
@@ -125,6 +144,9 @@ object LinkPreviews {
             .header("Accept-Language", "en")
             .build()
         http.newCall(req).execute().use { res ->
+            // 5xx is transient (server hiccup) → throw so load() won't cache it.
+            // 4xx is definitive (gone/forbidden) → no preview, and cache that.
+            if (res.code >= 500) throw java.io.IOException("server ${res.code}")
             if (!res.isSuccessful) return null
             val ct = res.header("Content-Type").orEmpty()
             if (ct.isNotBlank() && !ct.contains("html", ignoreCase = true)) return null
@@ -143,6 +165,7 @@ object LinkPreviews {
             .header("Cookie", "CONSENT=YES+cb")
             .build()
         http.newCall(req).execute().use { res ->
+            if (res.code >= 500) throw java.io.IOException("server ${res.code}")
             if (!res.isSuccessful) return null
             // The full description ("shortDescription") sits deep in the page's
             // ytInitialPlayerResponse JSON, so read more than for plain OG.
@@ -156,17 +179,19 @@ object LinkPreviews {
 
 /** Extract a preview from page [html]; null if it has no usable title. */
 internal fun parseOpenGraph(url: String, html: String): LinkPreview? {
-    val title = metaContent(html, "og:title") ?: titleTag(html) ?: return null
-    val desc = metaContent(html, "og:description")?.trim()?.ifBlank { null }
-    val image = metaContent(html, "og:image")?.let { absolutize(url, it) }
-    val site = metaContent(html, "og:site_name")?.trim()?.ifBlank { null } ?: hostOf(url)
+    val og = metaMap(html)
+    val title = og["og:title"] ?: titleTag(html) ?: return null
+    val desc = og["og:description"]?.trim()?.ifBlank { null }
+    val image = og["og:image"]?.let { absolutize(url, it) }
+    val site = og["og:site_name"]?.trim()?.ifBlank { null } ?: hostOf(url)
     return LinkPreview(url, title.trim(), desc, image, site, youtube = false)
 }
 
 /** Build a YouTube card: OG title, scraped full description, canonical thumbnail. */
 internal fun parseYouTube(url: String, id: String, html: String): LinkPreview {
-    val title = metaContent(html, "og:title")?.trim()?.ifBlank { null } ?: "YouTube video"
-    val desc = shortDescription(html) ?: metaContent(html, "og:description")?.trim()?.ifBlank { null }
+    val og = metaMap(html)
+    val title = og["og:title"]?.trim()?.ifBlank { null } ?: "YouTube video"
+    val desc = shortDescription(html) ?: og["og:description"]?.trim()?.ifBlank { null }
     val thumb = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
     return LinkPreview(url, title, desc, thumb, "YouTube", youtube = true)
 }
@@ -188,19 +213,27 @@ fun youTubeId(url: String): String? = YT_ID.find(url)?.groupValues?.get(1)
 
 fun isYouTube(url: String): Boolean = youTubeId(url) != null
 
-// `content` before/after `property|name`, either quote style, whitespace-tolerant.
-private fun metaContent(html: String, prop: String): String? {
-    val p = Regex.escape(prop)
-    val a = Regex(
-        """<meta[^>]+?(?:property|name)\s*=\s*["']$p["'][^>]*?content\s*=\s*["']([^"']*)["']""",
-        RegexOption.IGNORE_CASE,
-    )
-    val b = Regex(
-        """<meta[^>]+?content\s*=\s*["']([^"']*)["'][^>]*?(?:property|name)\s*=\s*["']$p["']""",
-        RegexOption.IGNORE_CASE,
-    )
-    val raw = a.find(html)?.groupValues?.get(1) ?: b.find(html)?.groupValues?.get(1) ?: return null
-    return htmlUnescape(raw).ifBlank { null }
+// Scan every <meta> tag ONCE (precompiled patterns, sliced to <head>) and index
+// it by its property/name → content, instead of two fresh whole-document regex
+// passes per property (the old metaContent recompiled and rescanned for each of
+// og:title/description/image/site_name). Attribute order/quote style don't matter
+// since we pull both attrs out of the matched tag independently.
+private val META_TAG = Regex("""<meta\b[^>]*>""", RegexOption.IGNORE_CASE)
+private val META_KEY = Regex("""(?:property|name)\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+private val META_CONTENT = Regex("""content\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+
+private fun metaMap(html: String): Map<String, String> {
+    // OG/meta tags live in <head> — stop there so we don't scan a multi-MB body.
+    val head = html.substringBefore("</head>")
+    val map = HashMap<String, String>()
+    for (m in META_TAG.findAll(head)) {
+        val tag = m.value
+        val key = META_KEY.find(tag)?.groupValues?.get(1)?.lowercase() ?: continue
+        val content = META_CONTENT.find(tag)?.groupValues?.get(1) ?: continue
+        val value = htmlUnescape(content).ifBlank { null } ?: continue
+        map.putIfAbsent(key, value) // first wins, matching the old first-match semantics
+    }
+    return map
 }
 
 private val TITLE_TAG = Regex("""<title[^>]*>([^<]*)</title>""", RegexOption.IGNORE_CASE)
