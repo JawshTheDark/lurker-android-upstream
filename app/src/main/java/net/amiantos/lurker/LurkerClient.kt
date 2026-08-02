@@ -100,6 +100,21 @@ internal fun whoisTargetNick(line: String?): String? {
     return parts.last().lowercase()
 }
 
+/**
+ * On returning to the foreground, should we reuse the existing WebSocket (just
+ * nudge presence) instead of force-cycling it? Reuse when it still reads
+ * [connected] AND either the trip was a sub-[BACKGROUND_CYCLE_MS] task-switcher
+ * hop OR a background anchor ([Prefs.backgroundConnect]) kept the process — and
+ * thus okhttp's ping/pong — alive throughout, so a dead socket would already have
+ * reconnected and there's no frozen-process zombie to reap. Cycling a live socket
+ * opens a duplicate connection the server closes, which thrashes on reopen.
+ */
+internal fun shouldReuseSocketOnForeground(
+    connected: Boolean,
+    quickHop: Boolean,
+    backgroundConnect: Boolean,
+): Boolean = connected && (quickHop || backgroundConnect)
+
 open class LurkerClient {
     /** True for the Lurker-server backend; DirectIrcBackend overrides to false to
      *  hide server-only surfaces (search, highlights, DCC, settings registry,
@@ -628,15 +643,24 @@ open class LurkerClient {
         // normal failure path still reconnects instantly).
         val quickHop = wentBackgroundAt > 0 && now - wentBackgroundAt < BACKGROUND_CYCLE_MS
         wentBackgroundAt = 0
-        if (!connected || !quickHop) {
+        // A background-connect session keeps the PROCESS alive the whole time the
+        // app is backgrounded, so okhttp's ping/pong never paused — a socket that
+        // had died would already have fired onFailure and reconnected. There's no
+        // frozen-process zombie to reap. Force-cycling a still-live socket in that
+        // case opens a SECOND connection for the same session: the server accepts
+        // the upgrade (onOpen resets our backoff), spots the duplicate, and closes
+        // it, so the two thrash green<->"Connecting…" for ~10s on every reopen
+        // (freakyy85's report). So reuse the live socket unless a frozen process
+        // (no background anchor) could have left a zombie behind.
+        if (shouldReuseSocketOnForeground(connected, quickHop, prefs?.backgroundConnect == true)) {
+            // Healthy socket. If it turns out dead after all, this send fails →
+            // onFailure → the normal reconnect path takes over immediately.
+            ws?.send(presenceFrame(true))
+        } else {
             backoffMs = INITIAL_BACKOFF
             cancelScheduledReconnect()
             connecting = false
             openSocket(maxMessageId.takeIf { it > 0 })
-        } else {
-            // send() returning false = the socket is dead after all; onFailure
-            // follows and the normal reconnect path takes over immediately.
-            ws?.send(presenceFrame(true))
         }
     }
 
