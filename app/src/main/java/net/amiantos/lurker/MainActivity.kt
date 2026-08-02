@@ -1669,7 +1669,11 @@ private fun BufferListBody(
                                 } else null,
                                 label = if (isFriendRow) client.friendDisplayName(buffer) else null,
                                 networkName = buffer.networkId?.let { client.networkName(it) },
-                                callCount = client.callPresence[buffer.key] ?: 0,
+                                // Only surface the call badge when THIS server has
+                                // voice on — otherwise stale presence from a
+                                // previously-connected voice server could show a
+                                // phone icon on a server that has no calling.
+                                callCount = if (client.voiceEnabled) client.callPresence[buffer.key] ?: 0 else 0,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
                                 },
