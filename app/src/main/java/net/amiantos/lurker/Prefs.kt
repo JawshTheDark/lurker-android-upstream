@@ -52,6 +52,17 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("inlineMedia", true)
         set(value) = sp.edit { putBoolean("inlineMedia", value) }
 
+    /** Fetch OpenGraph cards (title/description/image) for pasted links that
+     *  aren't already inline media (default on). */
+    var linkPreviews: Boolean
+        get() = sp.getBoolean("linkPreviews", true)
+        set(value) = sp.edit { putBoolean("linkPreviews", value) }
+
+    /** Show a YouTube link's title + full description as a rich card (default on). */
+    var youtubeDescriptions: Boolean
+        get() = sp.getBoolean("youtubeDescriptions", true)
+        set(value) = sp.edit { putBoolean("youtubeDescriptions", value) }
+
     /** Device-local sp added to the synced chat font size (0 = server default). */
     var chatTextScale: Int
         get() = sp.getInt("chatTextScale", 0)

@@ -32,6 +32,12 @@ object Ui {
     var theme by mutableStateOf(AppTheme.Oled)
     var inlineMedia by mutableStateOf(true)
 
+    /** Fetch OpenGraph preview cards for pasted (non-media) links. */
+    var linkPreviews by mutableStateOf(true)
+
+    /** Show a rich card with a YouTube link's title + description. */
+    var youtubeDescriptions by mutableStateOf(true)
+
     /** Device-local sp added to the synced chat font size (0 = server default).
      *  Handy on tablets, where the mobile default reads tiny on a big screen. */
     var chatTextScale by mutableStateOf(0)

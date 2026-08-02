@@ -344,6 +344,8 @@ class MainActivity : FragmentActivity() {
         locked = prefs.biometricLock && !(application as LurkerApp).unlocked
         Ui.theme = AppTheme.from(prefs.theme)
         Ui.inlineMedia = prefs.inlineMedia
+        Ui.linkPreviews = prefs.linkPreviews
+        Ui.youtubeDescriptions = prefs.youtubeDescriptions
         Ui.chatTextScale = prefs.chatTextScale
         Ui.clock24h = prefs.clock24h
         Ui.highlightColor = prefs.highlightColor
@@ -3559,6 +3561,8 @@ private fun MessageBubble(
                 }
             }
         }
+        // OpenGraph / YouTube preview cards for non-media links (own Settings toggles).
+        if (onLink != null) LinkPreviewCards(msg.text, onLink)
             // Timestamps are hidden here and revealed by swiping left (iMessage
             // style) — see the reveal overlay + drag above. Keeps the timeline
             // dense (d3fc0n1) while per-message times stay one gesture away.
@@ -3624,6 +3628,7 @@ private fun CompactMessageRow(
                 }
             }
         }
+        if (onLink != null) LinkPreviewCards(msg.text, onLink)
     }
 }
 
@@ -3903,6 +3908,7 @@ private fun MultichanBubbleRow(
                 }
             }
         }
+        if (onLink != null) LinkPreviewCards(msg.text, onLink)
     }
 }
 
@@ -3950,6 +3956,7 @@ private fun MultichanCompactRow(
                 }
             }
         }
+        if (onLink != null) LinkPreviewCards(msg.text, onLink)
     }
 }
 
@@ -4783,6 +4790,8 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 // not the server's registry, so they exist in direct mode too.
                 item { ThemePickerCard(prefs) }
                 item { InlineMediaCard(prefs) }
+                item { LinkPreviewsCard(prefs) }
+                item { YoutubeDescriptionsCard(prefs) }
                 item { ClockFormatCard(prefs) }
                 item { CompactMessagesCard(prefs) }
                 item { AccentColorCard(prefs) }
@@ -4955,6 +4964,64 @@ private fun InlineMediaCard(prefs: Prefs) {
             Switch(
                 checked = Ui.inlineMedia,
                 onCheckedChange = { Ui.inlineMedia = it; prefs.inlineMedia = it },
+            )
+        }
+    }
+}
+
+@Composable
+private fun LinkPreviewsCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Link previews", fontSize = 17.sp)
+                Text(
+                    "Show a title, description & image card under pasted links. Fetches the page from its site.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = Ui.linkPreviews,
+                onCheckedChange = { Ui.linkPreviews = it; prefs.linkPreviews = it },
+            )
+        }
+    }
+}
+
+@Composable
+private fun YoutubeDescriptionsCard(prefs: Prefs) {
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("YouTube descriptions", fontSize = 17.sp)
+                Text(
+                    "Expand YouTube links into a card with the video's title, thumbnail & description.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = Ui.youtubeDescriptions,
+                onCheckedChange = { Ui.youtubeDescriptions = it; prefs.youtubeDescriptions = it },
             )
         }
     }
