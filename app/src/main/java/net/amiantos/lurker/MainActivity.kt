@@ -4129,6 +4129,9 @@ private fun InlineAudioPlayer(url: String) {
     var isPlaying by remember(url) { mutableStateOf(false) }
     var positionMs by remember(url) { mutableStateOf(0L) }
     var durationMs by remember(url) { mutableStateOf(0L) }
+    // Surface load/decode failures instead of leaving the button silently stuck at
+    // ▶ 0:00 (which read as "the play button doesn't work"). Tapping again retries.
+    var error by remember(url) { mutableStateOf<String?>(null) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -4136,6 +4139,11 @@ private fun InlineAudioPlayer(url: String) {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY && player.duration > 0) durationMs = player.duration
                 if (state == Player.STATE_ENDED) { player.seekTo(0); player.playWhenReady = false }
+            }
+            override fun onPlayerError(e: androidx.media3.common.PlaybackException) {
+                DebugLog.e("audio", "play failed for $url: ${e.errorCodeName}: ${e.message}")
+                error = "couldn't play"
+                prepared = false // let a re-tap rebuild the pipeline and retry
             }
         }
         player.addListener(listener)
@@ -4166,22 +4174,29 @@ private fun InlineAudioPlayer(url: String) {
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            if (isPlaying) "⏸" else "▶",
-            color = AccentBlue,
-            fontSize = 22.sp,
-            modifier = Modifier
+        // A generous 44dp round tap target (the bare glyph was a small, easy-to-miss
+        // hit box). Clears any prior error and retries on tap.
+        Box(
+            Modifier
+                .size(44.dp)
                 .clip(CircleShape)
                 .clickable {
+                    error = null
                     if (!prepared) {
                         player.setMediaItem(MediaItem.fromUri(url))
                         player.prepare()
                         prepared = true
                     }
                     if (player.isPlaying) player.pause() else player.play()
-                }
-                .padding(horizontal = 8.dp, vertical = 2.dp),
-        )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                if (error != null) "↻" else if (isPlaying) "⏸" else "▶",
+                color = if (error != null) AlertRed else AccentBlue,
+                fontSize = 22.sp,
+            )
+        }
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(
                 url.substringAfterLast('/').substringBefore('?').take(40),
@@ -4213,8 +4228,8 @@ private fun InlineAudioPlayer(url: String) {
             }
         }
         Text(
-            if (durationMs > 0) "${mmss(positionMs)} / ${mmss(durationMs)}" else mmss(positionMs),
-            color = TextSecondary,
+            error ?: if (durationMs > 0) "${mmss(positionMs)} / ${mmss(durationMs)}" else mmss(positionMs),
+            color = if (error != null) AlertRed else TextSecondary,
             fontSize = 11.sp,
             modifier = Modifier.padding(start = 10.dp),
         )

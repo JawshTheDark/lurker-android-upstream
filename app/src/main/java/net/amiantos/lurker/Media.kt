@@ -9,7 +9,10 @@ enum class MediaKind { IMAGE, VIDEO, AUDIO }
 // Extension sets shared by the inline embeds and the full-screen viewer.
 val IMAGE_EXTS = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif")
 val VIDEO_EXTS = listOf(".mp4", ".webm", ".mkv", ".mov", ".m4v")
-val AUDIO_EXTS = listOf(".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a")
+// .3gp/.3gpp are technically video containers, but in practice they're phone
+// voice memos (AMR/AAC audio, no video track) — route them to the audio bar so
+// they get a scrubber, not a black video box. .aac/.amr are plain audio.
+val AUDIO_EXTS = listOf(".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a", ".3gp", ".3gpp", ".aac", ".amr")
 
 /**
  * Classify a URL by media type, or null if it isn't obviously media. Mirrors the
