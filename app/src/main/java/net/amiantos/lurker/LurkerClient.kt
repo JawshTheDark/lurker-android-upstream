@@ -1191,6 +1191,18 @@ open class LurkerClient {
                 dropBuffer("${networkId ?: "sys"}::${frame.optString("target")}")
             }
 
+            // Lurker 2.0: a buffer's target is a resolvable ATTRIBUTE, not an
+            // identity — a DM follows its peer through /nick, and a CASEMAPPING
+            // refold merges case-twin buffers. Every map here is keyed by
+            // "networkId::target", so the rename has to carry all of it across.
+            "buffer-renamed" -> {
+                val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
+                val from = frame.optString("from")
+                val to = frame.optString("to")
+                if (from.isEmpty() || to.isEmpty()) return
+                renameBuffer(networkId, from, to, merged = frame.optBoolean("merged", false))
+            }
+
             "search-result" -> {
                 if (frame.optInt("token", -1) != searchToken) return // superseded
                 searchLoading = false
@@ -1344,6 +1356,133 @@ open class LurkerClient {
         messagesByBuffer.remove(key)
         unread.remove(key)
         highlights.remove(key)
+    }
+
+    /** Move one map entry from [from] to [to], folding into whatever is already
+     *  there via [combine] (called as combine(surviving, incoming)). */
+    private fun <V> moveEntry(map: MutableMap<String, V>, from: String, to: String, combine: (V, V) -> V) {
+        val incoming = map.remove(from) ?: return
+        val surviving = map[to]
+        map[to] = if (surviving == null) incoming else combine(surviving, incoming)
+    }
+
+    /**
+     * Carry a renamed buffer's entire state from `from` to `to` (Lurker 2.0's
+     * `buffer-renamed`; see MIGRATION_2_0.md). [merged] means `from` folded INTO an
+     * existing `to` — a CASEMAPPING case-twin merge — so both sides combine instead
+     * of the mover simply landing on an empty key.
+     *
+     * Everything keyed by "networkId::target" has to move together. Miss one and it
+     * orphans silently: messages stop appending, badges freeze, the E2E lock and the
+     * per-buffer appearance overrides detach, in-flight sends ack into a dead key,
+     * and the peer's next line opens a SECOND buffer.
+     */
+    private fun renameBuffer(networkId: Int?, from: String, to: String, merged: Boolean) {
+        val old = "${networkId ?: "sys"}::$from"
+        val new = "${networkId ?: "sys"}::$to"
+        if (old == new) return
+        val idx = buffers.indexOfFirst { it.key == old }
+        if (idx < 0 && messagesByBuffer[old] == null) return // nothing of ours under that name
+        DebugLog.i("ws", "buffer renamed $from -> $to${if (merged) " (merged)" else ""}")
+
+        val wasActive = activeKey == old
+        // The Buffer row: `target` is a val, so replace the entry. When the
+        // destination row already exists (merge), drop the old row instead.
+        if (idx >= 0) {
+            if (buffers.any { it.key == new }) buffers.removeAt(idx)
+            else buffers[idx] = buffers[idx].copy(target = to)
+        } else {
+            ensureBuffer(networkId, to)
+        }
+
+        // Messages: concatenate and re-order, dropping ids the survivor already has.
+        messagesByBuffer.remove(old)?.let { incoming ->
+            val surviving = messagesByBuffer[new]
+            messagesByBuffer[new] = if (surviving == null) incoming else {
+                val seen = surviving.mapNotNullTo(HashSet()) { it.id.takeIf { id -> id > 0 } }
+                ensureOrdered(surviving + incoming.filter { it.id <= 0 || seen.add(it.id) })
+            }
+        }
+        moveEntry(unread, old, new) { a, b -> a + b }
+        moveEntry(highlights, old, new) { a, b -> a + b }
+        moveEntry(members, old, new) { a, _ -> a }        // survivor's roster is current
+        moveEntry(typing, old, new) { a, b -> a + b }
+        moveEntry(drafts, old, new) { a, b -> if (a.isBlank()) b else a }
+        moveEntry(inputHistory, old, new) { a, _ -> a }
+        moveEntry(topics, old, new) { a, _ -> a }
+        moveEntry(channelModes, old, new) { a, _ -> a }
+        moveEntry(callPresence, old, new) { a, b -> maxOf(a, b) }
+        moveEntry(hasMoreOlder, old, new) { a, b -> a || b }
+        moveEntry(loadingOlder, old, new) { a, b -> a || b }
+        moveEntry(notifyAlways, old, new) { a, b -> a || b }
+        moveEntry(dividerAfter, old, new) { a, b -> minOf(a, b) }
+        moveEntry(lastRead, old, new) { a, b -> maxOf(a, b) }
+        moveEntry(typingSentAt, old, new) { a, b -> maxOf(a, b) }
+        if (draftPending.remove(old)) draftPending.add(new)
+        // Cancel rather than re-point: a queued flush closes over the old key. The
+        // text survives in `drafts`, and the next edit re-arms the timer.
+        draftFlush.remove(old)?.let { main.removeCallbacks(it) }
+        if (e2eSeen.remove(old) && new !in e2eSeen) e2eSeen.add(new)
+        // Burst bookkeeping — if a rename lands mid-burst and these still say the
+        // old key, reconcileBuffers drops the renamed buffer as "closed elsewhere".
+        if (burstSeen.remove(old)) burstSeen.add(new)
+        if (old in burstBaseline) burstBaseline = burstBaseline - old + new
+
+        // Structures keyed by something else whose VALUES embed the target/key.
+        networkId?.let { nid ->
+            pins[nid]?.let { list ->
+                if (list.any { it.equals(from, true) }) {
+                    pins[nid] = list.map { if (it.equals(from, true)) to else it }.distinct()
+                }
+            }
+        }
+        pendingSends.filterValues { it.bufferKey == old }.forEach { (id, p) ->
+            pendingSends[id] = p.copy(bufferKey = new, target = to)
+        }
+        failedSends.filterValues { it.bufferKey == old }.forEach { (id, f) ->
+            failedSends[id] = f.copy(bufferKey = new, target = to)
+        }
+        pendingWhois.filterValues { it.first == old }.forEach { (nickKey, v) ->
+            pendingWhois[nickKey] = v.copy(first = new)
+        }
+        // A DM that followed its peer's /nick takes the peer's nick-keyed state too.
+        if (networkId != null && !Commands.isChannel(from)) {
+            val oldNick = "$networkId::${from.lowercase()}"
+            val newNick = "$networkId::${to.lowercase()}"
+            nickNotes.remove(oldNick)?.let { if (newNick !in nickNotes) nickNotes[newNick] = it }
+            presence.remove(oldNick)?.let { if (newNick !in presence) presence[newNick] = it }
+        }
+
+        // Device-local, buffer-keyed: the in-memory Ui mirror AND its persisted Prefs
+        // copy must both move, or the stale one wins on next launch.
+        val ui = net.amiantos.lurker.ui.theme.Ui
+        ui.compactOverrides.remove(old)?.let { if (new !in ui.compactOverrides) ui.compactOverrides[new] = it }
+        // containsKey distinguishes the "" ("no background here") sentinel from absent.
+        if (ui.backgroundOverrides.containsKey(old)) {
+            val v = ui.backgroundOverrides.remove(old)!!
+            if (!ui.backgroundOverrides.containsKey(new)) ui.backgroundOverrides[new] = v
+        }
+        if (ui.multichan.remove(old) && new !in ui.multichan) ui.multichan.add(new)
+        prefs?.let { p ->
+            p.compactOverrides.takeIf { it.containsKey(old) }?.let { m ->
+                p.compactOverrides = m - old + (new to m.getValue(old))
+            }
+            p.backgroundOverrides.takeIf { it.containsKey(old) }?.let { m ->
+                p.backgroundOverrides = m - old + (new to m.getValue(old))
+            }
+            if (old in p.multichanKeys) p.multichanKeys = p.multichanKeys - old + new
+            if (old in p.e2eBuffers) p.e2eBuffers = p.e2eBuffers - old + new
+        }
+
+        // Follow the rename in the UI: the open chat holds a Buffer VALUE copy, so
+        // it keeps rendering the dead key until pendingOpen re-points it.
+        if (wasActive) {
+            activeKey = new
+            buffers.firstOrNull { it.key == new }?.let {
+                activeBuffer = it
+                pendingOpen = it
+            }
+        }
     }
 
     /**
