@@ -8,13 +8,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -383,11 +388,16 @@ private fun GeneralLinkCard(p: LinkPreview, onOpen: (String) -> Unit) {
         Modifier
             .padding(top = 6.dp)
             .fillMaxWidth()
+            // Height comes from the text block, and the thumbnail stretches to match
+            // it. A fixed square thumb was vertically CENTERED instead, so it floated
+            // mid-card with dead gaps above and below it rather than sitting flush in
+            // the corner. heightIn keeps a one-line card from collapsing to a sliver.
+            .height(IntrinsicSize.Min)
+            .heightIn(min = 76.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(SurfaceDark)
             .border(0.5.dp, GlassBorder, RoundedCornerShape(12.dp))
             .clickable { onOpen(p.url) },
-        verticalAlignment = Alignment.CenterVertically,
     ) {
         p.imageUrl?.let {
             AsyncImage(
@@ -395,10 +405,10 @@ private fun GeneralLinkCard(p: LinkPreview, onOpen: (String) -> Unit) {
                 imageLoader = LocalContext.current.imageLoader,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(88.dp),
+                modifier = Modifier.fillMaxHeight().width(92.dp),
             )
         }
-        Column(Modifier.padding(10.dp)) {
+        Column(Modifier.weight(1f).padding(10.dp)) {
             (p.siteName)?.let {
                 Text(
                     it,
