@@ -915,6 +915,18 @@ open class LurkerClient {
                         // Protocol handshake refused: this build is older than the
                         // server's minimum. Retrying can't help — say so legibly.
                         status = "This app is too old for the server — please update the app."
+                    } else if (t is javax.net.ssl.SSLException) {
+                        // TLS refused: the certificate didn't check out. In practice
+                        // this is almost never the server — it's the NETWORK sitting
+                        // in the middle (a captive portal / hotspot sign-in page, or
+                        // an ISP walled garden presenting its own certificate). We
+                        // correctly refuse to hand the session token to it, but the
+                        // generic "Reconnecting…" left the user watching a spinner
+                        // with no idea they had to sign in to the Wi-Fi first. Keep
+                        // retrying — signing in fixes it without touching the app.
+                        status = "Can't verify this server's certificate — if you're on Wi-Fi, " +
+                            "sign in to the network first. Retrying…"
+                        scheduleReconnect()
                     } else {
                         status = if (code != null) "Reconnecting… (HTTP $code)" else "Reconnecting…"
                         scheduleReconnect()

@@ -26,8 +26,8 @@ android {
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
         minSdk = 31
         targetSdk = 36
-        versionCode = 107
-        versionName = "0.9.87"
+        versionCode = 108
+        versionName = "0.9.88"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
