@@ -215,9 +215,13 @@ open class LurkerClient {
 
     // ---- Voice/video calls (lurker#680) -------------------------------------
 
-    /** Whether the server has calling turned on (GET /api/config → voiceEnabled).
-     *  The whole call UI stays hidden when false, so an older/undeployed server
-     *  looks exactly as before. */
+    /** Bumped by every live `call-presence` delta, so a REST presence snapshot that
+     *  resolves after one can tell it's stale and stand down instead of clobbering it. */
+    private var callPresenceGen = 0
+
+    /** Whether the server has calling turned on (GET /api/config → `features.voice`,
+     *  or the pre-2.1 top-level `voiceEnabled`). The whole call UI stays hidden when
+     *  false, so an older/undeployed server looks exactly as before. */
     var voiceEnabled by mutableStateOf(false)
         private set
 
@@ -688,8 +692,21 @@ open class LurkerClient {
         runCatching {
             http.newCall(authed("/api/config").build()).execute().use { res ->
                 if (!res.isSuccessful) return@execute
-                val on = JSONObject(res.body?.string().orEmpty()).optBoolean("voiceEnabled", false)
-                post { voiceEnabled = on }
+                val cfg = JSONObject(res.body?.string().orEmpty())
+                // Lurker 2.1 moved this flag from the top level into `features`.
+                // Read the new home first and fall back to the old one, so one build
+                // works against both; a server advertising NEITHER doesn't have it.
+                val on = cfg.optJSONObject("features")?.optBoolean("voice", false)
+                    ?: cfg.optBoolean("voiceEnabled", false)
+                post {
+                    val wasOff = !voiceEnabled
+                    voiceEnabled = on
+                    // /api/config resolves after the connect burst, so the
+                    // backlog-complete hydrate ran while this still read false and
+                    // bailed. Snapshot now that we know calling is on, or the badge
+                    // stays absent for anyone who wasn't watching when it started.
+                    if (on && wasOff) hydrateCallPresence()
+                }
             }
         }
     }
@@ -698,24 +715,40 @@ open class LurkerClient {
      *  map — deltas alone drift across a reconnect (lurker#680). */
     fun hydrateCallPresence() {
         if (!voiceEnabled) return
+        // Snapshot the delta generation and the network list on the main thread,
+        // BEFORE the request goes out (see the guard when it lands).
+        val gen = callPresenceGen
+        val ids = networks.values.filter { it.connected }.map { it.id }
+        if (ids.isEmpty()) return
         io.execute {
-            runCatching {
-                http.newCall(authed("/api/voice/presence").build()).execute().use { res ->
-                    if (!res.isSuccessful) return@execute
-                    val body = JSONObject(res.body?.string().orEmpty())
-                    // Tolerate either {calls:[...]} or a bare [...]; each entry
-                    // carries networkId/target/count.
-                    val arr = body.optJSONArray("calls") ?: body.optJSONArray("presence") ?: return@execute
-                    val fresh = mutableMapOf<String, Int>()
-                    for (i in 0 until arr.length()) {
-                        val o = arr.optJSONObject(i) ?: continue
-                        val nid = if (o.isNull("networkId")) null else o.optInt("networkId")
-                        val target = o.optString("target")
-                        val count = o.optInt("count", 0)
-                        if (target.isNotEmpty() && count > 0) fresh["${nid ?: "sys"}::$target"] = count
+            val fresh = mutableMapOf<String, Int>()
+            for (nid in ids) {
+                runCatching {
+                    http.newCall(authed("/api/voice/presence?networkId=$nid").build()).execute().use { res ->
+                        if (!res.isSuccessful) return@use
+                        val body = JSONObject(res.body?.string().orEmpty())
+                        // Tolerate {calls:[...]} or {presence:[...]}.
+                        val arr = body.optJSONArray("calls") ?: body.optJSONArray("presence") ?: return@use
+                        for (i in 0 until arr.length()) {
+                            val o = arr.optJSONObject(i) ?: continue
+                            // A per-network response omits networkId on each entry —
+                            // use the one we asked for, or every key would be built
+                            // against "sys" and match no buffer.
+                            val entryNid = if (o.isNull("networkId")) nid else o.optInt("networkId", nid)
+                            val target = o.optString("target")
+                            val count = o.optInt("count", 0)
+                            if (target.isNotEmpty() && count > 0) fresh["$entryNid::$target"] = count
+                        }
                     }
-                    post { callPresence.clear(); callPresence.putAll(fresh) }
                 }
+            }
+            post {
+                // A live delta landed while this snapshot was in flight, so the
+                // snapshot is now the OLDER truth — drop it rather than clobber a
+                // newer count back to a stale one.
+                if (gen != callPresenceGen) return@post
+                callPresence.clear()
+                callPresence.putAll(fresh)
             }
         }
     }
@@ -960,7 +993,11 @@ open class LurkerClient {
                 if (target.isNotEmpty()) {
                     val key = "${networkId ?: "sys"}::$target"
                     val count = frame.optInt("count", 0)
-                    if (count > 0) callPresence[key] = count else callPresence.remove(key)
+                    // `active:false` ends the call even if a count tags along.
+                    val active = frame.optBoolean("active", count > 0)
+                    if (active && count > 0) callPresence[key] = count else callPresence.remove(key)
+                    // Marks this map newer than any REST snapshot already in flight.
+                    callPresenceGen++
                 }
             }
 
