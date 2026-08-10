@@ -129,10 +129,6 @@ data class FailedSend(
     val reason: String,
 )
 
-/** A LiveKit join grant minted by the Lurker server (lurker#680). [url] is the
- *  SFU websocket, [token] the per-room JWT, [room] its name. Media flows
- *  client<->SFU; Lurker only issues the token and moderates. */
-data class VoiceToken(val url: String, val token: String, val room: String)
 
 /** An inbound DCC file transfer, mirrored from the server's transfer rows. */
 data class DccTransfer(

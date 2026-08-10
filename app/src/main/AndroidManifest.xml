@@ -9,14 +9,6 @@
 
     <!-- Voice/video calls (lurker#680). Camera + a matching FGS type are optional:
          audio-only calls work without them. -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
         android:name=".LurkerApp"
@@ -72,10 +64,6 @@
 
         <!-- Holds an active voice/video call in the foreground so the OS keeps the
              mic/camera capture alive while the app is backgrounded (lurker#680). -->
-        <service
-            android:name=".CallService"
-            android:exported="false"
-            android:foregroundServiceType="microphone|camera" />
 
         <!-- Handles Reply / Mark-read / Mute actions on highlight & DM
              notifications (also the wrist actions on a paired Wear OS watch). -->

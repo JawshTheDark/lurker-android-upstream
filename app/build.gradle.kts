@@ -26,8 +26,8 @@ android {
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
         minSdk = 31
         targetSdk = 36
-        versionCode = 108
-        versionName = "0.9.88"
+        versionCode = 109
+        versionName = "0.9.89"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -126,13 +126,6 @@ dependencies {
     implementation("org.kitteh.irc:client-lib:9.0.0")
     // Encrypt direct-mode IRC/SASL secrets at rest (with a plaintext fallback).
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
-    // Voice/video calls (lurker#680): the Lurker server mints a LiveKit token and
-    // acts as call moderator; media flows client<->LiveKit SFU, never through
-    // Lurker. Core SDK + Compose renderers for video tracks.
-    implementation("io.livekit:livekit-android:2.27.0")
-    // NOTE: livekit-android-compose-components was dropped — the call UI renders
-    // video via the core SDK's TextureViewRenderer directly, so the Compose
-    // helper library (RoomScope/VideoRenderer) was pulled in but never used.
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

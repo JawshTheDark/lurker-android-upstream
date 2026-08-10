@@ -218,23 +218,6 @@ open class LurkerClient {
     /** "networkId::nickLower" -> presence state (online/offline/away/back). */
     val presence = mutableStateMapOf<String, String>()
 
-    // ---- Voice/video calls (lurker#680) -------------------------------------
-
-    /** Bumped by every live `call-presence` delta, so a REST presence snapshot that
-     *  resolves after one can tell it's stale and stand down instead of clobbering it. */
-    private var callPresenceGen = 0
-
-    /** Whether the server has calling turned on (GET /api/config → `features.voice`,
-     *  or the pre-2.1 top-level `voiceEnabled`). The whole call UI stays hidden when
-     *  false, so an older/undeployed server looks exactly as before. */
-    var voiceEnabled by mutableStateOf(false)
-        private set
-
-    /** bufferKey -> number of participants currently in that channel/DM's call.
-     *  Fed by `call-presence` frames and refreshed from /api/voice/presence on
-     *  connect (deltas alone can't be trusted across a reconnect). */
-    val callPresence = mutableStateMapOf<String, Int>()
-
     /** One-shot: the UI opens+focuses this buffer. Set when we actually join a
      *  channel (channel-joined) — which a 470 forward can rename vs. the request. */
     var pendingOpen: Buffer? by mutableStateOf(null)
@@ -689,110 +672,6 @@ open class LurkerClient {
     private fun authed(path: String): Request.Builder =
         Request.Builder().url("$baseUrl$path").header("Authorization", "Bearer ${token!!}")
 
-    // ---- Voice/video calls (lurker#680) -------------------------------------
-
-    /** Learn whether the server has calling enabled, so the call UI can hide when
-     *  it doesn't. Best-effort — a failure just leaves it off. */
-    fun fetchVoiceConfig() = io.execute {
-        runCatching {
-            http.newCall(authed("/api/config").build()).execute().use { res ->
-                if (!res.isSuccessful) return@execute
-                val cfg = JSONObject(res.body?.string().orEmpty())
-                // Lurker 2.1 moved this flag from the top level into `features`.
-                // Read the new home first and fall back to the old one, so one build
-                // works against both; a server advertising NEITHER doesn't have it.
-                val on = cfg.optJSONObject("features")?.optBoolean("voice", false)
-                    ?: cfg.optBoolean("voiceEnabled", false)
-                post {
-                    val wasOff = !voiceEnabled
-                    voiceEnabled = on
-                    // /api/config resolves after the connect burst, so the
-                    // backlog-complete hydrate ran while this still read false and
-                    // bailed. Snapshot now that we know calling is on, or the badge
-                    // stays absent for anyone who wasn't watching when it started.
-                    if (on && wasOff) hydrateCallPresence()
-                }
-            }
-        }
-    }
-
-    /** Snapshot every active call for the account's channels and replace the local
-     *  map — deltas alone drift across a reconnect (lurker#680). */
-    fun hydrateCallPresence() {
-        if (!voiceEnabled) return
-        // Snapshot the delta generation and the network list on the main thread,
-        // BEFORE the request goes out (see the guard when it lands).
-        val gen = callPresenceGen
-        val ids = networks.values.filter { it.connected }.map { it.id }
-        if (ids.isEmpty()) return
-        io.execute {
-            val fresh = mutableMapOf<String, Int>()
-            for (nid in ids) {
-                runCatching {
-                    http.newCall(authed("/api/voice/presence?networkId=$nid").build()).execute().use { res ->
-                        if (!res.isSuccessful) return@use
-                        val body = JSONObject(res.body?.string().orEmpty())
-                        // Tolerate {calls:[...]} or {presence:[...]}.
-                        val arr = body.optJSONArray("calls") ?: body.optJSONArray("presence") ?: return@use
-                        for (i in 0 until arr.length()) {
-                            val o = arr.optJSONObject(i) ?: continue
-                            // A per-network response omits networkId on each entry —
-                            // use the one we asked for, or every key would be built
-                            // against "sys" and match no buffer.
-                            val entryNid = if (o.isNull("networkId")) nid else o.optInt("networkId", nid)
-                            val target = o.optString("target")
-                            val count = o.optInt("count", 0)
-                            if (target.isNotEmpty() && count > 0) fresh["$entryNid::$target"] = count
-                        }
-                    }
-                }
-            }
-            post {
-                // A live delta landed while this snapshot was in flight, so the
-                // snapshot is now the OLDER truth — drop it rather than clobber a
-                // newer count back to a stale one.
-                if (gen != callPresenceGen) return@post
-                callPresence.clear()
-                callPresence.putAll(fresh)
-            }
-        }
-    }
-
-    /** Ask the server to mint a LiveKit join token for a channel/DM's call. May 403
-     *  when the channel's join policy needs a higher mode than you hold. */
-    fun requestVoiceToken(networkId: Int, target: String, onResult: (VoiceToken?, String?) -> Unit) {
-        io.execute {
-            try {
-                val body = JSONObject().put("networkId", networkId).put("target", target)
-                    .toString().toRequestBody("application/json".toMediaType())
-                http.newCall(authed("/api/voice/token").post(body).build()).execute().use { res ->
-                    val text = res.body?.string().orEmpty()
-                    if (!res.isSuccessful) {
-                        val err = runCatching { JSONObject(text).optString("error") }.getOrNull()
-                        post { onResult(null, err?.ifEmpty { null } ?: "call unavailable (HTTP ${res.code})") }
-                        return@execute
-                    }
-                    val o = JSONObject(text)
-                    val tok = VoiceToken(o.optString("url"), o.optString("token"), o.optString("room"))
-                    post { if (tok.url.isNotEmpty() && tok.token.isNotEmpty()) onResult(tok, null) else onResult(null, "malformed token") }
-                }
-            } catch (e: Exception) {
-                post { onResult(null, e.message ?: "network error") }
-            }
-        }
-    }
-
-    /** Op-only: mute or remove a participant from a call. */
-    fun moderateCall(networkId: Int, target: String, participant: String, action: String) = io.execute {
-        runCatching {
-            val body = JSONObject()
-                .put("networkId", networkId).put("target", target)
-                .put("participant", participant).put("action", action)
-                .toString().toRequestBody("application/json".toMediaType())
-            http.newCall(authed("/api/voice/moderate").post(body).build()).execute().close()
-        }
-    }
-
     private fun fetchNetworkNames() {
         try {
             http.newCall(authed("/api/networks").build()).execute().use { res ->
@@ -879,7 +758,6 @@ open class LurkerClient {
                     burstSeen.clear()
                     connected = true
                     connecting = false
-                    fetchVoiceConfig() // refresh calling availability each connect
                     status = null
                     backoffMs = INITIAL_BACKOFF
                 }
@@ -998,24 +876,7 @@ open class LurkerClient {
             "backlog-complete" -> {
                 snapshotComplete = true
                 reconcileBuffers()
-                hydrateCallPresence() // delta-only presence can't survive a reconnect
                 DebugLog.i("ws", "backlog-complete (${buffers.size} buffers)")
-            }
-
-            // Live call participant count for a channel/DM (lurker#680). Top-level
-            // frame (not nested in `irc`), so it's handled here directly.
-            "call-presence" -> {
-                val networkId = if (frame.isNull("networkId")) null else frame.optInt("networkId")
-                val target = frame.optString("target")
-                if (target.isNotEmpty()) {
-                    val key = "${networkId ?: "sys"}::$target"
-                    val count = frame.optInt("count", 0)
-                    // `active:false` ends the call even if a count tags along.
-                    val active = frame.optBoolean("active", count > 0)
-                    if (active && count > 0) callPresence[key] = count else callPresence.remove(key)
-                    // Marks this map newer than any REST snapshot already in flight.
-                    callPresenceGen++
-                }
             }
 
             // Carries the recomputed effective cap when the user changes their
@@ -1464,7 +1325,6 @@ open class LurkerClient {
         moveEntry(inputHistory, old, new) { a, _ -> a }
         moveEntry(topics, old, new) { a, _ -> a }
         moveEntry(channelModes, old, new) { a, _ -> a }
-        moveEntry(callPresence, old, new) { a, b -> maxOf(a, b) }
         moveEntry(hasMoreOlder, old, new) { a, b -> a || b }
         moveEntry(loadingOlder, old, new) { a, b -> a || b }
         moveEntry(notifyAlways, old, new) { a, b -> a || b }
