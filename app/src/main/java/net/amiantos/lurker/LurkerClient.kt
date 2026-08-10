@@ -390,6 +390,12 @@ open class LurkerClient {
     private var prefs: Prefs? = null
     protected var activeKey: String? = null
 
+    /** Which buffer is focused, for the UI to check before re-activating one it
+     *  restored. Rotation keeps this (the client is process-scoped) but a
+     *  process-death restore doesn't — and re-running setActive needlessly would
+     *  re-anchor the "New messages" divider to the tail. */
+    val activeBufferKey: String? get() = activeKey
+
     /** Highest server message id seen — the `?since=` cursor on reconnect. */
     private var maxMessageId = 0L
 

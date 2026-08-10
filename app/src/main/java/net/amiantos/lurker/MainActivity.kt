@@ -88,6 +88,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.toMutableStateList
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -238,7 +243,7 @@ private fun glassStyle(): HazeStyle = HazeStyle(
 )
 
 /** Where the app is: the buffer list, a chat, settings, DCC, or networks. */
-private sealed interface Screen {
+internal sealed interface Screen {
     data object Buffers : Screen
     data class Chat(val buffer: Buffer, val scrollToMsgId: Long? = null) : Screen
     data object Settings : Screen
@@ -251,6 +256,70 @@ private sealed interface Screen {
     data class ChannelList(val query: String? = null) : Screen
     data class NetworkEdit(val config: NetworkConfig?) : Screen
 }
+
+// Rotating the phone recreates the Activity, which used to reset the nav state and
+// dump you back on the buffer list, losing the channel you were reading (d3fc0n).
+// Screens are saved instead, so a rotate — or the system killing the app for memory
+// — puts you back where you were, back stack included.
+//
+// Encoded as ONE string per screen: the saved-instance Bundle takes a plain
+// ArrayList<String> without any nesting, which keeps this robust. U+0001 is the
+// separator because it can't appear in a channel name, nick, or network name.
+internal const val SCREEN_SEP = '\u0001'
+
+internal fun encodeScreen(s: Screen): String = when (s) {
+    Screen.Buffers -> "buffers"
+    Screen.Settings -> "settings"
+    Screen.Dcc -> "dcc"
+    Screen.Networks -> "networks"
+    Screen.Search -> "search"
+    Screen.Friends -> "friends"
+    Screen.Ignores -> "ignores"
+    Screen.Multichan -> "multichan"
+    is Screen.Chat -> listOf(
+        "chat",
+        s.buffer.networkId?.toString().orEmpty(), // empty = the :system: buffer
+        s.buffer.target,
+        s.buffer.networkName,
+        s.scrollToMsgId?.toString().orEmpty(),
+    ).joinToString(SCREEN_SEP.toString())
+    is Screen.ChannelList -> "channelList$SCREEN_SEP${s.query.orEmpty()}"
+    // Deliberately restores to the network LIST: the config is a whole object and
+    // the half-filled form wouldn't survive regardless, so the list is the honest
+    // place to land rather than a blank editor.
+    is Screen.NetworkEdit -> "networks"
+}
+
+internal fun decodeScreen(raw: String): Screen {
+    val p = raw.split(SCREEN_SEP)
+    return when (p.getOrNull(0)) {
+        "chat" -> if (p.size >= 4) {
+            Screen.Chat(
+                Buffer(p[1].toIntOrNull(), p[2], p[3]),
+                p.getOrNull(4)?.toLongOrNull(),
+            )
+        } else {
+            Screen.Buffers
+        }
+        "channelList" -> Screen.ChannelList(p.getOrNull(1)?.ifEmpty { null })
+        "settings" -> Screen.Settings
+        "dcc" -> Screen.Dcc
+        "networks" -> Screen.Networks
+        "search" -> Screen.Search
+        "friends" -> Screen.Friends
+        "ignores" -> Screen.Ignores
+        "multichan" -> Screen.Multichan
+        else -> Screen.Buffers
+    }
+}
+
+private val ScreenStateSaver: Saver<Screen, String> =
+    Saver(save = { encodeScreen(it) }, restore = { decodeScreen(it) })
+
+private val BackStackSaver = listSaver<SnapshotStateList<Screen>, String>(
+    save = { stack -> stack.map { encodeScreen(it) } },
+    restore = { saved -> saved.map { decodeScreen(it) }.toMutableStateList() },
+)
 
 class MainActivity : FragmentActivity() {
     // Process-scoped: the socket + buffer state outlive Activity recreation
@@ -327,11 +396,25 @@ class MainActivity : FragmentActivity() {
                 // Hoisted above the lock gate: a relock returns early before this
                 // line, so declaring it here (below the gate) would forget the open
                 // chat on every unlock. Keeping it up top preserves it.
-                var screen by remember { mutableStateOf<Screen>(Screen.Buffers) }
+                // rememberSaveable, not remember: a rotation recreates the Activity,
+                // and plain remember dumped you back on the buffer list mid-conversation.
+                var screen by rememberSaveable(stateSaver = ScreenStateSaver) {
+                    mutableStateOf<Screen>(Screen.Buffers)
+                }
                 // Back stack, so leaving a menu (or a nested channel) returns to
                 // where you were — not always the buffer list. Capped so a long
-                // session can't grow it without bound.
-                val backStack = remember { mutableStateListOf<Screen>() }
+                // session can't grow it without bound. Saved too, or a rotate would
+                // strand you with a Back that jumps straight to the buffer list.
+                val backStack = rememberSaveable(saver = BackStackSaver) { mutableStateListOf<Screen>() }
+                // Re-focus a chat we RESTORED (rotation or a process-death relaunch).
+                // Guarded on the client's current focus: rotation keeps it already
+                // set, and re-running setActive would re-anchor the "New messages"
+                // divider to the tail and lose your place in the unread run.
+                LaunchedEffect(Unit) {
+                    (screen as? Screen.Chat)?.buffer
+                        ?.takeIf { it.key != client.activeBufferKey }
+                        ?.let { client.setActive(it) }
+                }
                 fun go(dest: Screen) {
                     if (dest == screen) return
                     backStack.add(screen)
@@ -1950,9 +2033,14 @@ private fun ChatScreen(
     showMembersButton: Boolean = true,
 ) {
     BackHandler(enabled = !embedded, onBack = onBack)
-    // Seed the composer from the server-synced draft when the buffer opens.
+    // Seed the composer from the server-synced draft when the buffer opens. The
+    // text itself already survives a rotation (every keystroke writes through to
+    // the process-scoped client), but seeding with a bare TextFieldValue parked the
+    // caret at position 0 — so a rotate mid-sentence, or reopening a buffer with a
+    // draft, dropped you at the START of your own text. Seed the caret at the end.
     var draft by remember(buffer.key) {
-        mutableStateOf(TextFieldValue(client.drafts[buffer.key] ?: ""))
+        val seed = client.drafts[buffer.key] ?: ""
+        mutableStateOf(TextFieldValue(seed, TextRange(seed.length)))
     }
     // Flush the draft when leaving this buffer.
     DisposableEffect(buffer.key) { onDispose { client.flushDraft(buffer) } }
