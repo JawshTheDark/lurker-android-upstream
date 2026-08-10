@@ -1483,7 +1483,7 @@ private fun BufferListScreen(
             client.networks.toMap(),
             client.networkConfigs.toList(),
             client.pins.toMap(),
-            client.contacts.toList(),
+            client.favorites.toList(),
             client.presence.toMap(),
         ) { buildBufferSections(client) }
 
@@ -1672,7 +1672,9 @@ private fun BufferListBody(
                                 presence = if (isFriendRow) {
                                     client.presenceState(buffer.networkId, buffer.target).orEmpty()
                                 } else null,
-                                label = if (isFriendRow) client.friendDisplayName(buffer) else null,
+                                // Favorites carry no display name (2.0 dropped the
+                                // named-contact model) — the row reads the nick.
+                                label = null,
                                 networkName = buffer.networkId?.let { client.networkName(it) },
                                 // Only surface the call badge when THIS server has
                                 // voice on — otherwise stale presence from a
@@ -1681,6 +1683,12 @@ private fun BufferListBody(
                                 callCount = if (client.voiceEnabled) client.callPresence[buffer.key] ?: 0 else 0,
                                 onTogglePin = if (isFriendRow || buffer.isSystem || buffer.isServerBuffer) null else {
                                     { client.togglePin(buffer) }
+                                },
+                                // Server refuses system/server pseudo-buffers, so
+                                // don't offer it there.
+                                favorite = client.isFavorite(buffer),
+                                onToggleFavorite = if (buffer.isSystem || buffer.isServerBuffer) null else {
+                                    { client.toggleFavorite(buffer.networkId, buffer.target) }
                                 },
                                 onToggleNotify = if (buffer.isChannel) {
                                     { client.setNotifyAlways(buffer, !client.isNotifyAlways(buffer)) }
@@ -1728,39 +1736,26 @@ private fun buildBufferSections(client: LurkerClient): List<BufferSection> {
     val pinned = client.buffers.filter { client.isPinned(it) }
     if (pinned.isNotEmpty()) out.add(BufferSection("★ Pinned", pinned.sortedBy { it.target.lowercase() }))
 
-    // A "Friends" section: one row per contact's primary DM, synthesized from the
-    // contacts store INDEPENDENTLY of whether a buffer is open server-side — per
-    // amiantos, close-state is irrelevant to a friend buffer (the web sidebar is
-    // f(buffers ∪ friend-primary-DMs ∪ …)). Reuse the open buffer if we hold one
-    // (real casing / shared unread key); otherwise synthesize a transient row that
-    // materializes on tap via open-buffer. Friend primary DMs are then hidden from
-    // the per-network lists below (the web's friends.primaryDmKeys) so they don't
-    // show twice.
-    val friendRows = client.contacts.mapNotNull { c ->
-        val p = c.primary ?: return@mapNotNull null
-        val key = "${p.networkId}::${p.nick}"
-        client.buffers.firstOrNull { it.key == key }
-            ?: Buffer(p.networkId, p.nick, client.networkName(p.networkId))
+    // "Friends" and "Favorites" are two kind-filtered views of ONE server-owned
+    // favorites list (Lurker 2.0's contacts replacement): DMs surface as Friends
+    // with a presence dot, channels as Favorites. Rows are synthesized
+    // INDEPENDENTLY of whether the buffer is open server-side — per amiantos,
+    // close-state is irrelevant here (the web sidebar is f(buffers ∪ favorites ∪ …)).
+    // Reuse the open buffer when we hold one (real casing / shared unread key),
+    // else a transient row that materializes on tap via open-buffer. Both are then
+    // hidden from the per-network lists below so nothing shows twice.
+    //
+    // The server's order IS the user's chosen order, so it's preserved verbatim
+    // rather than re-sorted (presence still shows as the dot colour).
+    val favRows = client.favorites.map { f ->
+        client.buffers.firstOrNull { it.key == f.key }
+            ?: Buffer(f.networkId, f.target, client.networkName(f.networkId))
     }
-    val friendKeys = friendRows.map { it.key }.toSet()
-    if (friendRows.isNotEmpty()) {
-        out.add(
-            BufferSection(
-                "Friends",
-                // Online first, then away, then everyone else — matching the dot
-                // colours rather than lumping away in with online.
-                friendRows.sortedWith(
-                    compareBy<Buffer> {
-                        when (client.presenceState(it.networkId, it.target)) {
-                            "online", "back" -> 0
-                            "away" -> 1
-                            else -> 2
-                        }
-                    }.thenBy { it.target.lowercase() },
-                ),
-            ),
-        )
-    }
+    val friendKeys = favRows.map { it.key }.toSet()
+    val friendRows = favRows.filterNot { it.isChannel }
+    val favoriteChannels = favRows.filter { it.isChannel }
+    if (friendRows.isNotEmpty()) out.add(BufferSection("Friends", friendRows))
+    if (favoriteChannels.isNotEmpty()) out.add(BufferSection("⭐ Favorites", favoriteChannels))
 
     // A query someone just opened is the most time-sensitive thing in the list, but
     // it used to sit inside its network's group — potentially several screens down,
@@ -1837,14 +1832,25 @@ private fun BufferRow(
     /** Live participants in this row's call, 0 = no call (lurker#680). */
     callCount: Int = 0,
     onTogglePin: (() -> Unit)? = null,
+    /** Favorite/unfavorite this buffer — "Friends" for a DM, "Favorites" for a
+     *  channel, one server-side flag behind both labels. */
+    favorite: Boolean = false,
+    onToggleFavorite: (() -> Unit)? = null,
     onToggleNotify: (() -> Unit)? = null,
     onToggleMute: (() -> Unit)? = null,
     onClick: () -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
     var menu by remember { mutableStateOf(false) }
-    if (onClose != null || onTogglePin != null || onToggleMute != null) {
+    if (onClose != null || onTogglePin != null || onToggleMute != null || onToggleFavorite != null) {
         AppDropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            if (onToggleFavorite != null) {
+                val what = if (buffer.isChannel) "Favorites" else "Friends"
+                DropdownMenuItem(
+                    text = { Text(if (favorite) "Remove from $what" else "Add to $what") },
+                    onClick = { menu = false; onToggleFavorite() },
+                )
+            }
             if (onTogglePin != null) {
                 DropdownMenuItem(
                     text = { Text(if (pinned) "Unpin" else "Pin to top") },
@@ -3218,11 +3224,10 @@ private fun MemberActions(
             onOpenBuffer(client.focusTarget(networkId, nick))
         }
         SheetAction(if (client.nickNote(networkId, nick) != null) "Edit note" else "Add note") { editNote = true }
-        if (client.contacts.none { c -> c.targets.any { it.networkId == networkId && it.nick.equals(nick, true) } }) {
-            SheetAction("Add as friend") {
-                client.setContact(null, nick, notifyOnline = true, listOf(ContactTarget(networkId, nick, isPrimary = true)))
-                onDone()
-            }
+        if (client.isFavorite(networkId, nick)) {
+            SheetAction("Remove from Friends") { client.toggleFavorite(networkId, nick); onDone() }
+        } else {
+            SheetAction("Add to Friends") { client.addFriend(networkId, nick); onDone() }
         }
         // Mute this nick's mentions of you without hiding their messages — handy
         // for a bot that pings your name. A global NOHIGHLIGHT rule on their mask.
@@ -6628,13 +6633,13 @@ private fun presenceColor(state: String?): Color = when (state) {
 @Composable
 private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
-    // Refresh presence for EVERY identity (not just the primary) on entry, so the
-    // per-network dots are accurate (d3fc0n).
-    LaunchedEffect(client.contacts.size) {
-        client.contacts.forEach { c -> c.targets.forEach { client.probePresence(it.networkId, it.nick) } }
+    // Friends are the DM half of the server's favorites list (Lurker 2.0 removed
+    // the named-contact model, so a friend is simply a favorited DM buffer).
+    val friends = client.favorites.filterNot { it.isChannel }
+    // Refresh presence on entry so the dots are accurate rather than stale.
+    LaunchedEffect(friends.size) {
+        friends.forEach { client.probePresence(it.networkId, it.target) }
     }
-    var dialogContact by remember { mutableStateOf<Contact?>(null) }
-    var showDialog by remember { mutableStateOf(false) }
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = CanvasBlack,
@@ -6645,21 +6650,15 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                     TextButton(onClick = onBack) { Text("‹", color = AccentBlue, fontSize = 26.sp) }
                 },
                 title = { Text("Friends", fontWeight = FontWeight.SemiBold) },
-                actions = {
-                    TextButton(onClick = { dialogContact = null; showDialog = true }) {
-                        Text("+ Add", color = AccentBlue, fontSize = 15.sp)
-                    }
-                },
             )
         },
     ) { padding ->
-        val friends = remember(client.contacts.toList()) { client.contacts.sortedBy { it.displayName.lowercase() } }
-        val connectedNets = client.networks.values.filter { it.connected }.sortedBy { it.name }
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             if (friends.isEmpty()) {
                 item {
                     Text(
-                        "No friends yet. Tap “+ Add” above, or long-press a nick in a channel's member list → “Add as friend.”",
+                        "No friends yet. Long-press a nick in a channel's member list → “Add to Friends”, " +
+                            "or open a DM and tap ⭐. Friends sync across every device signed into your account.",
                         color = TextSecondary,
                         modifier = Modifier.padding(24.dp),
                     )
@@ -6684,47 +6683,36 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                 }
             }
             items(friends.size) { i ->
-                val c = friends[i]
-                var menuOpen by remember(c.id) { mutableStateOf(false) }
+                val f = friends[i]
+                var menuOpen by remember(f.bufferId) { mutableStateOf(false) }
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = c.primary != null) {
-                            c.primary?.let { onOpenBuffer(client.focusTarget(it.networkId, it.nick)) }
-                        }
+                        .clickable { onOpenBuffer(client.focusTarget(f.networkId, f.target)) }
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(c.displayName, fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
-                        // Every connected network, coloured by this friend's
-                        // presence there: green online, yellow away, red offline,
-                        // grey unknown (no identity on that network → can't know).
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                            modifier = Modifier.padding(top = 5.dp),
-                        ) {
-                            connectedNets.forEach { net ->
-                                val target = c.targets.firstOrNull { it.networkId == net.id }
-                                Text(
-                                    net.name,
-                                    fontSize = 13.sp,
-                                    color = presenceColor(target?.let { client.presenceOf(it) }),
-                                )
-                            }
-                        }
+                    Box(
+                        Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(presenceColor(client.presenceState(f.networkId, f.target))),
+                    )
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                        Text(f.target, fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+                        Text(
+                            client.networkName(f.networkId),
+                            fontSize = 13.sp,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
                     }
                     Box {
                         TextButton(onClick = { menuOpen = true }) { Text("⋯", color = TextSecondary, fontSize = 20.sp) }
                         AppDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text("Edit") },
-                                onClick = { menuOpen = false; dialogContact = c; showDialog = true },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Remove", color = AlertRed) },
-                                onClick = { menuOpen = false; client.deleteContact(c.id) },
+                                text = { Text("Remove from Friends", color = AlertRed) },
+                                onClick = { menuOpen = false; client.toggleFavorite(f.networkId, f.target) },
                             )
                         }
                     }
@@ -6732,90 +6720,6 @@ private fun FriendsScreen(client: LurkerClient, onOpenBuffer: (Buffer) -> Unit, 
                 HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(start = 20.dp))
             }
             item { Spacer(Modifier.height(24.dp)) }
-        }
-    }
-    if (showDialog) {
-        FriendEditDialog(
-            client = client,
-            existing = dialogContact,
-            onDismiss = { showDialog = false },
-            onSave = { name, notify, targets ->
-                client.setContact(
-                    dialogContact?.id, name, notify,
-                    targets.mapIndexed { idx, (net, nick) -> ContactTarget(net, nick, isPrimary = idx == 0) },
-                )
-                showDialog = false
-            },
-        )
-    }
-}
-
-/** Add or edit a friend: a display name, one-or-more (network, nick) identities
- *  (the first is the primary DM target), and an online-notify toggle. */
-@Composable
-private fun FriendEditDialog(
-    client: LurkerClient,
-    existing: Contact?,
-    onDismiss: () -> Unit,
-    onSave: (String, Boolean, List<Pair<Int, String>>) -> Unit,
-) {
-    val nets = remember { client.networks.values.sortedBy { it.name } }
-    val defaultNet = nets.firstOrNull()?.id ?: 0
-    var name by remember(existing?.id) { mutableStateOf(existing?.displayName ?: "") }
-    var notify by remember(existing?.id) { mutableStateOf(existing?.notifyOnline ?: false) }
-    val targets = remember(existing?.id) {
-        mutableStateListOf<Pair<Int, String>>().apply {
-            addAll(existing?.targets?.map { it.networkId to it.nick } ?: listOf(defaultNet to ""))
-        }
-    }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(color = SurfaceDark, shape = RoundedCornerShape(16.dp), border = BorderStroke(0.5.dp, GlassBorder)) {
-            Column(
-                Modifier.padding(16.dp).fillMaxWidth().verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(if (existing == null) "Add friend" else "Edit friend", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Text("Identities (first is the primary DM)", color = TextSecondary, fontSize = 12.sp)
-                targets.forEachIndexed { i, (netId, nick) ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        var netMenu by remember { mutableStateOf(false) }
-                        Box {
-                            TextButton(onClick = { netMenu = true }) {
-                                Text(client.networks[netId]?.name ?: "net $netId", color = AccentBlue, fontSize = 13.sp)
-                            }
-                            AppDropdownMenu(expanded = netMenu, onDismissRequest = { netMenu = false }) {
-                                nets.forEach { n ->
-                                    DropdownMenuItem(
-                                        text = { Text(n.name) },
-                                        onClick = { targets[i] = n.id to targets[i].second; netMenu = false },
-                                    )
-                                }
-                            }
-                        }
-                        OutlinedTextField(
-                            nick, { targets[i] = netId to it },
-                            placeholder = { Text("nick") }, singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (targets.size > 1) {
-                            TextButton(onClick = { targets.removeAt(i) }) { Text("✕", color = AlertRed) }
-                        }
-                    }
-                }
-                TextButton(onClick = { targets.add(defaultNet to "") }) { Text("+ Add identity", color = AccentBlue, fontSize = 13.sp) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Notify when they come online", color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    Switch(checked = notify, onCheckedChange = { notify = it })
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) }
-                    val valid = name.isNotBlank() && targets.any { it.second.isNotBlank() }
-                    TextButton(enabled = valid, onClick = {
-                        onSave(name.trim(), notify, targets.filter { it.second.isNotBlank() }.map { it.first to it.second.trim() })
-                    }) { Text("Save", color = if (valid) AccentBlue else TextSecondary, fontWeight = FontWeight.SemiBold) }
-                }
-            }
         }
     }
 }

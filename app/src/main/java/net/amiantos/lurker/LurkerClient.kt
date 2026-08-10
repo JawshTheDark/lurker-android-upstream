@@ -207,8 +207,13 @@ open class LurkerClient {
     /** Message ids the user has bookmarked (saved). Synced from the server. */
     val bookmarkIds = mutableStateSetOf<Long>()
 
-    /** Friends/contacts, synced from contacts-snapshot + contact-updated/deleted. */
-    val contacts = mutableStateListOf<Contact>()
+    /**
+     * The user's favorite buffers in the server's global order (Lurker 2.0+, which
+     * removed contacts). Rendered as two kind-filtered sections — DMs as "Friends",
+     * channels as "Favorites". Additive: a pre-2.0 server never sends the frame, so
+     * an empty list simply means no favorites — never block waiting for it.
+     */
+    val favorites = mutableStateListOf<FavoriteEntry>()
 
     /** "networkId::nickLower" -> presence state (online/offline/away/back). */
     val presence = mutableStateMapOf<String, String>()
@@ -559,7 +564,7 @@ open class LurkerClient {
             pendingJoin.clear()
             serverExtended = false
             bookmarkIds.clear()
-            contacts.clear()
+            favorites.clear()
             presence.clear()
             pins.clear()
             nickNotes.clear()
@@ -1316,20 +1321,19 @@ open class LurkerClient {
                 }
             }
 
-            "contacts-snapshot" -> {
-                val arr = frame.optJSONArray("contacts")
-                contacts.clear()
+            // The whole ordered favorites list, replaced wholesale — deliberately the
+            // same frame for the connect-burst seed and every later
+            // favorite/unfavorite/reorder correction, so one handler covers both.
+            "favorites-changed" -> {
+                val arr = frame.optJSONArray("favorites")
+                favorites.clear()
                 if (arr != null) for (i in 0 until arr.length()) {
-                    parseContact(arr.optJSONObject(i))?.let(contacts::add)
+                    val o = arr.optJSONObject(i) ?: continue
+                    val target = o.optString("target")
+                    if (target.isNotEmpty()) {
+                        favorites.add(FavoriteEntry(o.optInt("networkId"), target, o.optInt("bufferId")))
+                    }
                 }
-            }
-            "contact-updated" -> parseContact(frame.optJSONObject("contact"))?.let { c ->
-                val i = contacts.indexOfFirst { it.id == c.id }
-                if (i >= 0) contacts[i] = c else contacts.add(c)
-            }
-            "contact-deleted" -> {
-                val id = frame.optInt("contactId", -1)
-                contacts.removeAll { it.id == id }
             }
 
             "chanlist-result" -> {
@@ -2081,29 +2085,37 @@ open class LurkerClient {
         ws?.send(JSONObject().put("type", "add-alias").put("name", name).put("expansion", expansion).toString())
     }
 
-    private fun parseContact(o: JSONObject?): Contact? {
-        if (o == null) return null
-        val targetsArr = o.optJSONArray("targets")
-        val targets = if (targetsArr == null) emptyList() else (0 until targetsArr.length()).mapNotNull { i ->
-            val t = targetsArr.optJSONObject(i) ?: return@mapNotNull null
-            ContactTarget(t.optInt("networkId"), t.optString("nick"), t.optBoolean("isPrimary"))
-        }
-        return Contact(o.optInt("id"), o.optString("displayName"), o.optBoolean("notifyOnline", true), targets)
-    }
-
-    /** Presence state for a contact target, or null if unknown. */
-    fun presenceOf(t: ContactTarget): String? = presence["${t.networkId}::${t.nick.lowercase()}"]
-
     /** A network's display name, for synthesizing a buffer row we don't hold yet. */
     fun networkName(id: Int): String = networkNames[id] ?: "network"
 
-    /** The contact's display NAME for a buffer whose key matches a friend's primary
-     *  target — a Lurker friend is a named entity with (nick, network) targets, so
-     *  the Friends row should read the friend's name, not the underlying nick. */
-    fun friendDisplayName(buffer: Buffer): String? =
-        contacts.firstOrNull { c ->
-            c.primary?.let { "${it.networkId}::${it.nick}" == buffer.key } == true
-        }?.displayName?.takeIf { it.isNotBlank() }
+    /** Whether this buffer is in the user's favorites (Friends if a DM, Favorites
+     *  if a channel — one server-side flag behind both labels). */
+    fun isFavorite(buffer: Buffer): Boolean = isFavorite(buffer.networkId, buffer.target)
+
+    fun isFavorite(networkId: Int?, target: String): Boolean =
+        networkId != null && favorites.any { it.networkId == networkId && it.target.equals(target, true) }
+
+    /**
+     * Favorite / unfavorite a buffer. The server replies with the whole
+     * `favorites-changed` list, so we don't touch local state here — and because
+     * one buffer holds one placement, favoriting also drops any pin (the server
+     * follows up with `pins-changed`). Server/system pseudo-buffers and closed
+     * buffers are refused server-side, so the UI only offers this on real ones.
+     */
+    fun toggleFavorite(networkId: Int?, target: String) {
+        val nid = networkId ?: return
+        val verb = if (isFavorite(nid, target)) "unfavorite-buffer" else "favorite-buffer"
+        ws?.send(JSONObject().put("type", verb).put("networkId", nid).put("target", target).toString())
+    }
+
+    /** Rewrite the global favorites order. Id-form ONLY — favorites span networks,
+     *  so bare names can't address them. May be a subset: unmentioned favorites keep
+     *  their relative order after the supplied ones, which lets one kind-filtered
+     *  section (Friends or Favorites) reorder without disturbing the other. */
+    fun reorderFavorites(bufferIds: List<Int>) {
+        if (bufferIds.isEmpty()) return
+        ws?.send(JSONObject().put("type", "reorder-favorites").put("bufferIds", JSONArray(bufferIds)).toString())
+    }
 
     /** Raw presence state for a nick ("online" / "away" / "offline" / "back"), or
      *  null when we've never heard — which the UI renders as grey "unknown". */
@@ -2117,19 +2129,15 @@ open class LurkerClient {
         return st != null && st != "offline"
     }
 
-    /** Create (contactId=null) or update a contact, then let the server echo it back. */
-    fun setContact(contactId: Int?, displayName: String, notifyOnline: Boolean, targets: List<ContactTarget>) {
-        val arr = JSONArray()
-        targets.forEach { arr.put(JSONObject().put("networkId", it.networkId).put("nick", it.nick).put("isPrimary", it.isPrimary)) }
-        val msg = JSONObject().put("type", "set-contact").put("displayName", displayName)
-            .put("notifyOnline", notifyOnline).put("targets", arr)
-        if (contactId != null) msg.put("contactId", contactId)
-        ws?.send(msg.toString())
-    }
-
-    fun deleteContact(contactId: Int) {
-        contacts.removeAll { it.id == contactId }
-        ws?.send(JSONObject().put("type", "delete-contact").put("contactId", contactId).toString())
+    /**
+     * Add a peer to Friends: favorite their DM buffer. The server refuses a CLOSED
+     * buffer, so mint it first — `open` and the favorite ride the same socket in
+     * order, which makes the pair safe without waiting for a round trip.
+     */
+    fun addFriend(networkId: Int, nick: String) {
+        if (isFavorite(networkId, nick)) return
+        ws?.send(JSONObject().put("type", "open-buffer").put("networkId", networkId).put("target", nick).toString())
+        ws?.send(JSONObject().put("type", "favorite-buffer").put("networkId", networkId).put("target", nick).toString())
     }
 
     /** Ask the server to refresh a nick's presence (e.g. when opening their DM). */

@@ -173,18 +173,19 @@ data class NotifiableEvent(
     val msgId: Long = 0,
 )
 
-/** One reachable identity (network + nick) for a contact. */
-data class ContactTarget(val networkId: Int, val nick: String, val isPrimary: Boolean = false)
-
-/** A friend/contact the server tracks and reports presence for. */
-data class Contact(
-    val id: Int,
-    val displayName: String,
-    val notifyOnline: Boolean,
-    val targets: List<ContactTarget>,
-) {
-    /** The identity to open when the contact row is tapped (primary, else first). */
-    val primary: ContactTarget? get() = targets.firstOrNull { it.isPrimary } ?: targets.firstOrNull()
+/**
+ * One entry in the user's server-owned favorites list — the contacts successor
+ * (Lurker 2.0 removed contacts entirely).
+ *
+ * The server owns ONE global ordered list spanning networks; `favorites-changed`
+ * ships it wholesale. The UI renders it as two kind-filtered sections: DMs under
+ * "Friends", channels under "Favorites" — one flag, two labels. [bufferId] is the
+ * stable identity (it survives renames) and the only form `reorder-favorites`
+ * accepts, since names can't address across networks.
+ */
+data class FavoriteEntry(val networkId: Int, val target: String, val bufferId: Int) {
+    val key: String get() = "$networkId::$target"
+    val isChannel: Boolean get() = Commands.isChannel(target)
 }
 
 /** A server-synced custom slash alias: /name expands to expansion with $1..$9 params. */
