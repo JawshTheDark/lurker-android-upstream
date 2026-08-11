@@ -1935,7 +1935,7 @@ private fun BufferRow(
 @Composable
 private fun TranslatedBadge(lang: String?, baseSize: Int) {
     Text(
-        if (lang != null) "🌐${'$'}lang" else "🌐",
+        if (lang != null) "🌐$lang" else "🌐",
         color = AccentBlue,
         fontSize = (baseSize - 5).sp,
         fontWeight = FontWeight.Medium,
@@ -2836,7 +2836,7 @@ private fun ChatScreen(
                                             fontWeight = FontWeight.Medium,
                                         )
                                         Text(
-                                            "was: ${'$'}{translateOriginal.orEmpty()}",
+                                            "was: ${translateOriginal.orEmpty()}",
                                             color = TextSecondary,
                                             fontSize = 12.sp,
                                             maxLines = 2,
