@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import net.amiantos.lurker.TranslateBackend
 import androidx.compose.ui.text.font.FontFamily
 
 /** The app's three looks. OLED is the original pure-black design. */
@@ -37,6 +38,21 @@ object Ui {
 
     /** Show a rich card with a YouTube link's title + description. */
     var youtubeDescriptions by mutableStateOf(true)
+
+    // ---- Live translation (device-local mirror of Prefs) ---------------------
+    var translateBackend by mutableStateOf(TranslateBackend.OFF)
+    var translateEndpoint by mutableStateOf("https://translate.irc.so")
+    var translateApiKey by mutableStateOf("")
+    var translateModel by mutableStateOf("")
+
+    /** The language incoming messages are translated INTO. */
+    var translateTargetLang by mutableStateOf("en")
+
+    /** Buffer keys with incoming translation on. */
+    val translateRead = mutableStateListOf<String>()
+
+    /** buffer.key -> outgoing language for composed messages. */
+    val translateOutgoing = mutableStateMapOf<String, String>()
 
     /** Device-local sp added to the synced chat font size (0 = server default).
      *  Handy on tablets, where the mobile default reads tiny on a big screen. */

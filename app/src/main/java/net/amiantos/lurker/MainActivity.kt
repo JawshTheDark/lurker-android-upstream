@@ -359,6 +359,18 @@ class MainActivity : FragmentActivity() {
         Ui.inlineMedia = prefs.inlineMedia
         Ui.linkPreviews = prefs.linkPreviews
         Ui.youtubeDescriptions = prefs.youtubeDescriptions
+        Ui.translateBackend = when (prefs.translateBackend) {
+            "libretranslate" -> TranslateBackend.LIBRETRANSLATE
+            "openai" -> TranslateBackend.OPENAI
+            else -> TranslateBackend.OFF
+        }
+        Ui.translateEndpoint = prefs.translateEndpoint
+        Ui.translateApiKey = prefs.translateApiKey
+        Ui.translateModel = prefs.translateModel
+        Ui.translateTargetLang = prefs.translateTargetLang
+        Ui.translateRead.clear()
+        Ui.translateRead.addAll(prefs.translateRead.distinct())
+        Ui.translateOutgoing.putAll(prefs.translateOutgoing)
         Ui.chatTextScale = prefs.chatTextScale
         Ui.clock24h = prefs.clock24h
         Ui.highlightColor = prefs.highlightColor
@@ -1915,6 +1927,25 @@ private fun BufferRow(
     }
 }
 
+/** Marks a row whose text we replaced with a translation. Carries the DETECTED
+ *  source language so a reader knows which language to answer in (d3fc0n asked
+ *  for this in-channel); LLM backends return no detection, so they get a bare
+ *  globe. Only truly-changed rows are badged — an identical answer means it was
+ *  already in the target language, and a badge there would lie. */
+@Composable
+private fun TranslatedBadge(lang: String?, baseSize: Int) {
+    Text(
+        if (lang != null) "🌐${'$'}lang" else "🌐",
+        color = AccentBlue,
+        fontSize = (baseSize - 5).sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(AccentBlue.copy(alpha = 0.14f))
+            .padding(horizontal = 4.dp, vertical = 1.dp),
+    )
+}
+
 @Composable
 private fun UnreadBadge(count: Int, highlight: Boolean) {
     Box(
@@ -2058,6 +2089,14 @@ private fun ChatScreen(
     }
     var showMembers by remember { mutableStateOf(false) }
     var showE2e by remember { mutableStateOf(false) }
+    var showTranslate by remember { mutableStateOf(false) }
+    // Outgoing-translation cycle. translateOriginal holds what the user TYPED while
+    // the composer shows the translation awaiting approval (rendered as "was: …");
+    // translateFailed makes the next press post as typed rather than trapping the
+    // message behind a broken translator.
+    var translateOriginal by remember(buffer.key) { mutableStateOf<String?>(null) }
+    var translateFailed by remember(buffer.key) { mutableStateOf(false) }
+    var translating by remember(buffer.key) { mutableStateOf(false) }
     var showChannelPanel by remember { mutableStateOf(false) }
     // Message whose long-press action sheet is open, if any.
     var actionMsg by remember(buffer.key) { mutableStateOf<Msg?>(null) }
@@ -2341,6 +2380,51 @@ private fun ChatScreen(
             listState.scrollToItem((rows.lastIndex + headerCount).coerceAtLeast(0))
         }
     }
+    /**
+     * Actually put the composer contents on the wire. Split out of the send
+     * lambda so the outgoing-translation cycle can reach it: an already-in-
+     * target-language message sends straight from the translate coroutine
+     * instead of demanding a second press.
+     */
+    fun dispatchSend(raw: String) {
+        client.notifyTyping(buffer, active = false)
+        client.addInputHistory(buffer, raw)
+        val myNick = buffer.networkId?.let { client.networks[it]?.nick }
+        val text = Commands.expandAlias(raw, client.aliases, myNick, buffer.target)
+        when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
+            is ParsedInput.Ops -> {
+                client.execute(buffer, parsed.ops)
+                parsed.openTarget?.let { target ->
+                    buffer.networkId?.let { onOpenBuffer(client.focusTarget(it, target)) }
+                }
+                // Only a plain message (or /me, /notice) is subject to
+                // the keep-position preference. A command always re-pins:
+                // its reply comes back as id-less rows that the stay-put
+                // logic can't count, so it would land silently below the
+                // fold with nothing to say it arrived.
+                val wasMessage = parsed.ops.all { it.type in SENDABLE_OPS }
+                if (!keepPositionOnSend || !wasMessage) repinToTail()
+                // A sent message echoes back asynchronously; arm the
+                // one-shot so the scroll lands on YOUR line once it does.
+                // (Commands append synchronously, so repinToTail already
+                // caught them — no echo to wait for.)
+                if (wasMessage && !keepPositionOnSend) followSelfSend = true
+            }
+            // Local command output (/help and friends) is id-less too.
+            is ParsedInput.Local -> { client.localNotice(buffer, parsed.message); repinToTail() }
+            is ParsedInput.Browse ->
+                // Lurker has a rich channel browser; direct mode falls back
+                // to a raw LIST (results land in the server buffer).
+                if (client.serverFeatures) onBrowse(parsed.query)
+                else client.execute(
+                    buffer,
+                    listOf(WireOp("raw", line = "LIST" + (parsed.query?.let { " $it" } ?: ""))),
+                )
+        }
+        draft = TextFieldValue("")
+        client.setDraftLocal(buffer, "") // clears + syncs draft-clear
+    }
+
 
     // Follow the tail only when the tail itself changed — a prepend of older
     // history grows the list without moving the newest message.
@@ -2471,6 +2555,7 @@ private fun ChatScreen(
                     is ChatRow.Bubble -> if (compact) {
                         CompactMessageRow(
                             row.msg, baseSize, openLink,
+                            translateKey = buffer.key,
                             onAction = { actionMsg = it },
                             onMediaLoaded = { mediaTick++ },
                             flash = row.msg.id == flashMsgId,
@@ -2479,6 +2564,7 @@ private fun ChatScreen(
                         )
                     } else MessageBubble(
                         row.msg, row.first, row.last, baseSize, openLink,
+                        translateKey = buffer.key,
                         onMediaLoaded = { mediaTick++ },
                         onAction = { actionMsg = it },
                         onSwipeReply = { replyTo(it) },
@@ -2594,6 +2680,10 @@ private fun ChatScreen(
                             Text("⌄", color = TextSecondary, fontSize = 13.sp)
                         }
                         AppDropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Translate", color = AccentBlue) },
+                                onClick = { titleMenu = false; showTranslate = true },
+                            )
                             DropdownMenuItem(
                                 text = { Text("Encryption (E2E)", color = OnlineGreen) },
                                 onClick = { titleMenu = false; showE2e = true; client.execute(buffer, listOf(WireOp("e2e", target = buffer.target, line = "status"))) },
@@ -2720,45 +2810,91 @@ private fun ChatScreen(
                     onTakePhoto = { launchCamera() },
                     suggestions = suggestions,
                     onPickSuggestion = { draft = applySuggestion(it); client.setDraftLocal(buffer, draft.text) },
+                    // Long-press send = post exactly what's typed, no translation.
+                    onSendVerbatim = {
+                        val raw = draft.text.trim()
+                        if (raw.isNotEmpty()) {
+                            translateOriginal = null
+                            translateFailed = false
+                            dispatchSend(raw)
+                        }
+                    },
+                    banner = if (translating || translateOriginal != null) {
+                        {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                if (translating) {
+                                    Text("Translating…", color = TextSecondary, fontSize = 12.sp)
+                                } else {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            "Send again to post this translation",
+                                            color = AccentBlue,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                        )
+                                        Text(
+                                            "was: ${'$'}{translateOriginal.orEmpty()}",
+                                            color = TextSecondary,
+                                            fontSize = 12.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    TextButton(onClick = {
+                                        // Back to what they typed; the cycle restarts.
+                                        val orig = translateOriginal.orEmpty()
+                                        translateOriginal = null
+                                        draft = TextFieldValue(orig, TextRange(orig.length))
+                                        client.setDraftLocal(buffer, orig)
+                                    }) { Text("Undo", color = TextSecondary, fontSize = 12.sp) }
+                                }
+                            }
+                        }
+                    } else null,
                 ) {
                     val raw = draft.text.trim()
                     if (raw.isEmpty()) return@Composer
-                    client.notifyTyping(buffer, active = false)
-                    client.addInputHistory(buffer, raw)
-                    val myNick = buffer.networkId?.let { client.networks[it]?.nick }
-                    val text = Commands.expandAlias(raw, client.aliases, myNick, buffer.target)
-                    when (val parsed = Commands.parse(text, buffer.target, buffer.networkId != null)) {
-                        is ParsedInput.Ops -> {
-                            client.execute(buffer, parsed.ops)
-                            parsed.openTarget?.let { target ->
-                                buffer.networkId?.let { onOpenBuffer(client.focusTarget(it, target)) }
+                    // Outgoing translation: translate -> preview -> approve. The user
+                    // must SEE what they're about to say in a language they can't
+                    // read, so the translation goes back in the composer and the next
+                    // press sends it verbatim. Commands and /me pass straight through,
+                    // and noise ("lol") skips the round trip entirely — waiting on a
+                    // translator to send "lol" reads as "it just doesn't send".
+                    val outLang = Translator.outgoingLang(buffer.key)
+                    if (outLang != null && !raw.startsWith("/") &&
+                        translateOriginal == null && !translateFailed && !isSkippable(raw)
+                    ) {
+                        translating = true
+                        chatScope.launch {
+                            val t = runCatching { Translator.translateNow(raw, outLang) }.getOrNull()
+                            translating = false
+                            when {
+                                // A broken translator must never hold a message
+                                // hostage: say so, and let the next press post as typed.
+                                t == null -> {
+                                    translateFailed = true
+                                    client.localNotice(
+                                        buffer,
+                                        "Translation failed — press send again to post as typed.",
+                                    )
+                                }
+                                // Already in that language: send now, no second press.
+                                !isMeaningful(raw, t.text) -> dispatchSend(raw)
+                                else -> {
+                                    translateOriginal = raw
+                                    draft = TextFieldValue(t.text, TextRange(t.text.length))
+                                    client.setDraftLocal(buffer, t.text)
+                                }
                             }
-                            // Only a plain message (or /me, /notice) is subject to
-                            // the keep-position preference. A command always re-pins:
-                            // its reply comes back as id-less rows that the stay-put
-                            // logic can't count, so it would land silently below the
-                            // fold with nothing to say it arrived.
-                            val wasMessage = parsed.ops.all { it.type in SENDABLE_OPS }
-                            if (!keepPositionOnSend || !wasMessage) repinToTail()
-                            // A sent message echoes back asynchronously; arm the
-                            // one-shot so the scroll lands on YOUR line once it does.
-                            // (Commands append synchronously, so repinToTail already
-                            // caught them — no echo to wait for.)
-                            if (wasMessage && !keepPositionOnSend) followSelfSend = true
                         }
-                        // Local command output (/help and friends) is id-less too.
-                        is ParsedInput.Local -> { client.localNotice(buffer, parsed.message); repinToTail() }
-                        is ParsedInput.Browse ->
-                            // Lurker has a rich channel browser; direct mode falls back
-                            // to a raw LIST (results land in the server buffer).
-                            if (client.serverFeatures) onBrowse(parsed.query)
-                            else client.execute(
-                                buffer,
-                                listOf(WireOp("raw", line = "LIST" + (parsed.query?.let { " $it" } ?: ""))),
-                            )
+                        return@Composer
                     }
-                    draft = TextFieldValue("")
-                    client.setDraftLocal(buffer, "") // clears + syncs draft-clear
+                    translateOriginal = null
+                    translateFailed = false
+                    dispatchSend(raw)
                 }
             }
         }
@@ -2821,6 +2957,13 @@ private fun ChatScreen(
         )
     }
 
+    if (showTranslate) {
+        TranslateSheet(
+            bufferKey = buffer.key,
+            bufferName = buffer.displayName,
+            onDismiss = { showTranslate = false },
+        )
+    }
     if (showE2e) {
         E2eSheet(
             client = client,
@@ -3361,6 +3504,8 @@ private fun MessageBubble(
     onSwipeReply: ((Msg) -> Unit)? = null,
     onChannel: ((String) -> Unit)? = null,
     flash: Boolean = false,
+    /** Buffer key for live translation, or null to always show the original. */
+    translateKey: String? = null,
     // iMessage-style timestamp reveal. revealProvider returns the shared offset
     // (0 = hidden, negative = pulled left); onReveal feeds a left-drag delta into
     // it; onRevealEnd springs it back. Read as a lambda so the drag animates in the
@@ -3371,6 +3516,10 @@ private fun MessageBubble(
     onRevealEnd: () -> Unit = {},
 ) {
     val self = msg.self
+    // Null unless this buffer has translation on and the row is worth translating
+    // (see rememberTranslation for the exclusions). Hoisted here because the badge
+    // renders up by the nick, above the bubble body.
+    val translation = rememberTranslation(msg, translateKey)
     // Swipe a bubble sideways to reply (reuses the long-press reply seam). The
     // live drag is a plain float (synchronous, no per-delta coroutine that could
     // land after the release); the Animatable only drives the spring back so the
@@ -3480,6 +3629,10 @@ private fun MessageBubble(
                     Spacer(Modifier.width(6.dp))
                     LockGlyph(color = OnlineGreen, size = (baseSize - 5).dp)
                 }
+                translation?.let {
+                    Spacer(Modifier.width(6.dp))
+                    TranslatedBadge(it.lang, baseSize)
+                }
             }
         }
         // A message fully painted with one mIRC background becomes a bubble of
@@ -3516,8 +3669,13 @@ private fun MessageBubble(
             // output; the link/channel handlers are stable (remembered in ChatScreen),
             // so their nullability is the only relevant input.
             val linkColor = if (self) Color.White else AccentBlue
-            val body = remember(msg.text, linkColor, onLink != null, onChannel != null) {
-                mircAnnotated(msg.text, linkColor, onLink, onChannel)
+            // Live translation is a render-time OVERLAY: only the displayed text
+            // changes. Everything that scans the message (media embeds, link
+            // previews below) keeps reading msg.text, so a translator can't
+            // re-spell a URL out from under them.
+            val shown = translation?.text ?: msg.text
+            val body = remember(shown, linkColor, onLink != null, onChannel != null) {
+                mircAnnotated(shown, linkColor, onLink, onChannel)
             }
             Text(
                 if (msg.type == "error") buildAnnotatedString {
@@ -3568,17 +3726,24 @@ private fun CompactMessageRow(
     flash: Boolean = false,
     onNickTap: (() -> Unit)? = null,
     onChannel: ((String) -> Unit)? = null,
+    /** Buffer key for live translation, or null to always show the original. */
+    translateKey: String? = null,
 ) {
     val paintedBg = remember(msg.text) { Mirc.wholeMessageBg(msg.text)?.let { Color(it) } }
     val goldHighlight = !msg.self && paintedBg == null && (msg.matched || flash)
     val highlightBg = if (Ui.highlightColor != 0) Color(Ui.highlightColor) else HighlightGold
     val time = remember(msg.time, Ui.clock24h) { formatTime(msg.time) }
     val accent = AccentBlue
+    val translation = rememberTranslation(msg, translateKey)
+    val shown = translation?.text ?: msg.text
+    // Compact mode is one continuous Text, so the badge rides inline as a glyph
+    // rather than a separate composable.
+    val badge = translation?.let { "🌐" + (it.lang ?: "") + " " } ?: ""
     // Cache the regex-heavy mIRC parse so a ChatScreen recomposition doesn't
     // re-parse every visible compact row (the buildAnnotatedString assembly below
     // is cheap; the parse is not).
-    val body = remember(msg.text, accent, onLink != null, onChannel != null) {
-        mircAnnotated(msg.text, accent, onLink, onChannel)
+    val body = remember(shown, accent, onLink != null, onChannel != null) {
+        mircAnnotated(shown, accent, onLink, onChannel)
     }
     val line = buildAnnotatedString {
         if (time != null) {
@@ -3595,6 +3760,9 @@ private fun CompactMessageRow(
             withStyle(nickStyle) { append(msg.nick) }
         }
         append("  ")
+        if (badge.isNotEmpty()) {
+            withStyle(SpanStyle(color = AccentBlue, fontSize = (baseSize - 4).sp)) { append(badge) }
+        }
         when (msg.type) {
             "error" -> withStyle(SpanStyle(color = AlertRed)) { append(body) }
             "notice" -> withStyle(SpanStyle(color = NoticeAmber)) { append(body) }
@@ -4464,6 +4632,11 @@ private fun Composer(
     onTakePhoto: (() -> Unit)? = null,
     suggestions: List<String> = emptyList(),
     onPickSuggestion: (String) -> Unit = {},
+    /** Long-press send: post EXACTLY what was typed, skipping translation. */
+    onSendVerbatim: (() -> Unit)? = null,
+    /** Shown above the input while a translation waits for approval. */
+    banner: (@Composable () -> Unit)? = null,
+    // Trailing lambda — must stay LAST so the call site keeps its `) { … }` form.
     onSend: () -> Unit,
 ) {
     var showFormat by remember { mutableStateOf(false) }
@@ -4490,6 +4663,7 @@ private fun Composer(
             }
         }
         if (showFormat) FormatBar(draft, onChange)
+        banner?.invoke()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -4562,7 +4736,11 @@ private fun Composer(
             val canSend = draft.text.isNotBlank()
             Box(
                 Modifier.size(38.dp).clip(CircleShape)
-                    .clickable(enabled = canSend, onClick = onSend)
+                    .combinedClickable(
+                        enabled = canSend,
+                        onClick = onSend,
+                        onLongClick = onSendVerbatim,
+                    )
                     .semantics { contentDescription = "Send message"; role = Role.Button },
                 contentAlignment = Alignment.Center,
             ) {
@@ -4805,6 +4983,7 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 item { InlineMediaCard(prefs) }
                 item { LinkPreviewsCard(prefs) }
                 item { YoutubeDescriptionsCard(prefs) }
+                item { TranslationCard(prefs) }
                 item { ClockFormatCard(prefs) }
                 item { CompactMessagesCard(prefs) }
                 item { AccentColorCard(prefs) }
@@ -6835,4 +7014,221 @@ private fun humanBytes(n: Long): String {
         value /= 1024; i++
     }
     return String.format("%.1f %s", value, units[i])
+}
+
+/**
+ * Per-buffer translation controls. Reading and posting are independent: one
+ * translates what arrives, the other what you send.
+ *
+ * Languages are PICKERS, never text entry — a typo'd language code fails silently
+ * at the API and looks like the feature is broken. Endpoint/key/model are genuinely
+ * free-form and live in Settings.
+ */
+@Composable
+private fun TranslateSheet(bufferKey: String, bufferName: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context) }
+    val off = Ui.translateBackend == TranslateBackend.OFF
+    val reading = bufferKey in Ui.translateRead
+    val outgoing = Ui.translateOutgoing[bufferKey]
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceRaised,
+        title = { Text("Translate $bufferName", color = TextPrimary) },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done", color = AccentBlue) } },
+        text = {
+        Column {
+        if (off) {
+            Text(
+                "No translator configured. Settings → Translation.",
+                color = TextSecondary,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Translate incoming", color = TextPrimary, fontSize = 15.sp)
+                Text(
+                    "Into ${languageName(Ui.translateTargetLang)}. Sends message text to your translator.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                enabled = !off,
+                checked = reading,
+                onCheckedChange = { on ->
+                    if (on) Ui.translateRead.add(bufferKey) else Ui.translateRead.remove(bufferKey)
+                    prefs.translateRead = Ui.translateRead.toSet()
+                    // Toggling must not leave a stale overlay on any cached row.
+                    Translator.clear()
+                },
+            )
+        }
+        HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 8.dp))
+        Text("Post in another language", color = TextPrimary, fontSize = 15.sp)
+        Text(
+            "Your message is translated and shown for approval before it sends.",
+            color = TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
+        LanguagePicker(
+            selected = outgoing,
+            enabled = !off,
+            includeOff = true,
+        ) { code ->
+            if (code == null) Ui.translateOutgoing.remove(bufferKey) else Ui.translateOutgoing[bufferKey] = code
+            prefs.translateOutgoing = Ui.translateOutgoing.toMap()
+        }
+        }
+        },
+    )
+}
+
+/** A dropdown of the supported languages. [includeOff] adds a leading "Off" entry
+ *  (used for the outgoing picker, where not translating is the default). */
+@Composable
+private fun LanguagePicker(
+    selected: String?,
+    enabled: Boolean = true,
+    includeOff: Boolean = false,
+    onPick: (String?) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(enabled = enabled, onClick = { open = true }) {
+            Text(
+                selected?.let { languageName(it) } ?: "Off",
+                color = if (enabled) AccentBlue else TextSecondary,
+                fontSize = 15.sp,
+            )
+            Text(" ⌄", color = TextSecondary, fontSize = 13.sp)
+        }
+        AppDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (includeOff) {
+                DropdownMenuItem(
+                    text = { Text("Off", color = if (selected == null) AccentBlue else TextPrimary) },
+                    onClick = { open = false; onPick(null) },
+                )
+            }
+            TRANSLATE_LANGUAGES.forEach { (code, name) ->
+                DropdownMenuItem(
+                    text = { Text(name, color = if (code == selected) AccentBlue else TextPrimary) },
+                    onClick = { open = false; onPick(code) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Device-local translation setup. Deliberately NOT synced: which translator a
+ * device can reach is a property of that device, and the endpoint may be on a LAN.
+ * Turning it on here doesn't translate anything by itself — each buffer opts in
+ * from its own Translate menu, because translating ships that conversation's text
+ * to the configured endpoint.
+ */
+@Composable
+private fun TranslationCard(prefs: Prefs) {
+    var backendMenu by remember { mutableStateOf(false) }
+    Surface(
+        color = SurfaceDark,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(0.5.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 4.dp),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp, 12.dp)) {
+            Text("Translation", fontSize = 17.sp)
+            Text(
+                "Translate messages per channel. Text is sent to the translator you choose — " +
+                    "nothing goes through Lurker.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Service", color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Box {
+                    TextButton(onClick = { backendMenu = true }) {
+                        Text(
+                            when (Ui.translateBackend) {
+                                TranslateBackend.LIBRETRANSLATE -> "LibreTranslate"
+                                TranslateBackend.OPENAI -> "OpenAI-compatible"
+                                TranslateBackend.OFF -> "Off"
+                            },
+                            color = AccentBlue,
+                            fontSize = 15.sp,
+                        )
+                        Text(" ⌄", color = TextSecondary, fontSize = 13.sp)
+                    }
+                    AppDropdownMenu(expanded = backendMenu, onDismissRequest = { backendMenu = false }) {
+                        listOf(
+                            TranslateBackend.OFF to "Off",
+                            TranslateBackend.LIBRETRANSLATE to "LibreTranslate",
+                            TranslateBackend.OPENAI to "OpenAI-compatible",
+                        ).forEach { (b, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label, color = if (b == Ui.translateBackend) AccentBlue else TextPrimary) },
+                                onClick = {
+                                    backendMenu = false
+                                    Ui.translateBackend = b
+                                    prefs.translateBackend = when (b) {
+                                        TranslateBackend.LIBRETRANSLATE -> "libretranslate"
+                                        TranslateBackend.OPENAI -> "openai"
+                                        TranslateBackend.OFF -> "off"
+                                    }
+                                    // Backend change invalidates every cached answer.
+                                    Translator.clear()
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            if (Ui.translateBackend != TranslateBackend.OFF) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Read messages in", color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    LanguagePicker(selected = Ui.translateTargetLang) { code ->
+                        code?.let {
+                            Ui.translateTargetLang = it
+                            prefs.translateTargetLang = it
+                            Translator.clear()
+                        }
+                    }
+                }
+                SettingField("Endpoint", Ui.translateEndpoint) {
+                    Ui.translateEndpoint = it; prefs.translateEndpoint = it; Translator.clear()
+                }
+                SettingField("API key (optional)", Ui.translateApiKey, secret = true) {
+                    Ui.translateApiKey = it; prefs.translateApiKey = it; Translator.clear()
+                }
+                if (Ui.translateBackend == TranslateBackend.OPENAI) {
+                    SettingField("Model", Ui.translateModel) {
+                        Ui.translateModel = it; prefs.translateModel = it; Translator.clear()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A labelled free-text setting row (endpoint / key / model — the genuinely
+ *  free-form ones; languages are always pickers). */
+@Composable
+private fun SettingField(label: String, value: String, secret: Boolean = false, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label, fontSize = 12.sp) },
+        singleLine = true,
+        visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+        textStyle = LocalTextStyle.current.copy(fontSize = 14.sp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
 }

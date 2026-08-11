@@ -63,6 +63,47 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("youtubeDescriptions", true)
         set(value) = sp.edit { putBoolean("youtubeDescriptions", value) }
 
+    // ---- Live translation (device-local; never synced) ------------------------
+    // Which translator a device can reach is a property of that device, and
+    // translating ships message text to a third party — so all of this is local
+    // and per-buffer, never server state.
+
+    /** "off" | "libretranslate" | "openai". */
+    var translateBackend: String
+        get() = sp.getString("translateBackend", "off") ?: "off"
+        set(value) = sp.edit { putString("translateBackend", value) }
+
+    var translateEndpoint: String
+        get() = sp.getString("translateEndpoint", "https://translate.irc.so") ?: "https://translate.irc.so"
+        set(value) = sp.edit { putString("translateEndpoint", value) }
+
+    var translateApiKey: String
+        get() = sp.getString("translateApiKey", "") ?: ""
+        set(value) = sp.edit { putString("translateApiKey", value) }
+
+    var translateModel: String
+        get() = sp.getString("translateModel", "") ?: ""
+        set(value) = sp.edit { putString("translateModel", value) }
+
+    /** The language incoming messages are translated INTO. */
+    var translateTargetLang: String
+        get() = sp.getString("translateTargetLang", "en") ?: "en"
+        set(value) = sp.edit { putString("translateTargetLang", value) }
+
+    /** Buffer keys with incoming translation switched on. */
+    var translateRead: Set<String>
+        get() = sp.getStringSet("translateRead", emptySet()) ?: emptySet()
+        set(value) = sp.edit { putStringSet("translateRead", value) }
+
+    /** buffer.key -> outgoing language code for composed messages. */
+    var translateOutgoing: Map<String, String>
+        get() = runCatching {
+            val s = sp.getString("translateOutgoing", null) ?: return emptyMap()
+            val o = JSONObject(s)
+            o.keys().asSequence().associateWith { o.getString(it) }
+        }.getOrDefault(emptyMap())
+        set(value) = sp.edit { putString("translateOutgoing", JSONObject(value as Map<*, *>).toString()) }
+
     /** Device-local sp added to the synced chat font size (0 = server default). */
     var chatTextScale: Int
         get() = sp.getInt("chatTextScale", 0)

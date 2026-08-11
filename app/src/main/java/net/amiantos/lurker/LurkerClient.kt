@@ -1382,6 +1382,8 @@ open class LurkerClient {
             if (!ui.backgroundOverrides.containsKey(new)) ui.backgroundOverrides[new] = v
         }
         if (ui.multichan.remove(old) && new !in ui.multichan) ui.multichan.add(new)
+        if (ui.translateRead.remove(old) && new !in ui.translateRead) ui.translateRead.add(new)
+        ui.translateOutgoing.remove(old)?.let { if (new !in ui.translateOutgoing) ui.translateOutgoing[new] = it }
         prefs?.let { p ->
             p.compactOverrides.takeIf { it.containsKey(old) }?.let { m ->
                 p.compactOverrides = m - old + (new to m.getValue(old))
@@ -1391,6 +1393,10 @@ open class LurkerClient {
             }
             if (old in p.multichanKeys) p.multichanKeys = p.multichanKeys - old + new
             if (old in p.e2eBuffers) p.e2eBuffers = p.e2eBuffers - old + new
+            if (old in p.translateRead) p.translateRead = p.translateRead - old + new
+            p.translateOutgoing.takeIf { it.containsKey(old) }?.let { m ->
+                p.translateOutgoing = m - old + (new to m.getValue(old))
+            }
         }
 
         // Follow the rename in the UI: the open chat holds a Buffer VALUE copy, so
