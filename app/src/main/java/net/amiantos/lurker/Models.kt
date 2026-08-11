@@ -298,4 +298,14 @@ data class SettingOption(
     val choices: List<String> = emptyList(),
     val min: Int? = null,
     val max: Int? = null,
+    /**
+     * Instance feature this setting depends on (matched against `/api/config`'s
+     * `features`), or null when it always applies.
+     *
+     * The server does NOT filter these out of the bootstrap payload, so a
+     * registry-driven settings screen renders authentic-looking toggles for
+     * features the instance never mounted — you'd flip one and get silence.
+     * Hiding is the client's job; see [LurkerClient.settingAvailable].
+     */
+    val requiresFeature: String? = null,
 )

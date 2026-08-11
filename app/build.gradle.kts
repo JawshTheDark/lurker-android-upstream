@@ -26,8 +26,8 @@ android {
         // the mainline API level — a Boox Palma is API 33. Nothing here needs 34.
         minSdk = 31
         targetSdk = 36
-        versionCode = 112
-        versionName = "0.9.92"
+        versionCode = 113
+        versionName = "0.9.93"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -127,6 +127,11 @@ dependencies {
     // Encrypt direct-mode IRC/SASL secrets at rest (with a plaintext fallback).
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     testImplementation(libs.junit)
+    // Android ships org.json, but the unit-test android.jar stubs every method to
+    // THROW — so any parser that touches JSON is untestable without the real thing
+    // on the test classpath. Wire-format parsing is most of this client's risk
+    // surface, so it needs to be testable.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

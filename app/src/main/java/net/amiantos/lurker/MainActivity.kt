@@ -4937,9 +4937,15 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
     var category by remember { mutableStateOf<String?>(null) }
     BackHandler { if (category != null) category = null else onBack() }
 
-    val byCategory = remember(client.settingsRegistry.toList()) {
+    // Keyed on the feature flags too: an entry can become available mid-session when
+    // /api/config lands (it's fetched async on connect, after the registry).
+    val byCategory = remember(client.settingsRegistry.toList(), client.serverFeatureFlags.toMap()) {
         client.settingsRegistry
             .filter { it.category.isNotEmpty() && it.category != "system" && !settingHiddenOnMobile(it.key) }
+            // HIDE, don't merely disable, anything gated on a feature this instance
+            // never mounted — the server sends those entries regardless, so without
+            // this we'd render authentic-looking toggles whose endpoints 404.
+            .filter { client.settingAvailable(it) }
             .groupBy { it.category }
     }
     val orderedCategories = remember(byCategory) {

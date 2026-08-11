@@ -366,6 +366,22 @@ open class LurkerClient {
     var bookmarksHasMore by mutableStateOf(false)
 
     // Settings (registry-driven; empty if the server predates the endpoint).
+    /**
+     * The instance's advertised feature flags (`/api/config` → `features`).
+     *
+     * A MISSING flag means OFF — an older server that doesn't advertise a feature
+     * doesn't have it — so a failed fetch can never conjure one the instance lacks.
+     */
+    val serverFeatureFlags = mutableStateMapOf<String, Boolean>()
+
+    /** Whether this instance has [feature] turned on. Absent ⇒ false, deliberately. */
+    fun hasFeature(feature: String): Boolean = serverFeatureFlags[feature] == true
+
+    /** Whether a registry setting should be shown at all. Settings gated on a
+     *  feature the instance doesn't have are HIDDEN, not merely disabled. */
+    fun settingAvailable(option: SettingOption): Boolean =
+        option.requiresFeature?.let { hasFeature(it) } ?: true
+
     val settingsRegistry = mutableStateListOf<SettingOption>()
     val settingsValues = mutableStateMapOf<String, Any?>()
     var settingsError by mutableStateOf<String?>(null)
@@ -567,6 +583,7 @@ open class LurkerClient {
             bookmarksNextBefore = null
             bookmarksHasMore = false
             settingsRegistry.clear()
+            serverFeatureFlags.clear()
             settingsValues.clear()
             settingsLoaded = false
             // The client is process-scoped, so sign-out→sign-in happens without
@@ -678,6 +695,27 @@ open class LurkerClient {
     private fun authed(path: String): Request.Builder =
         Request.Builder().url("$baseUrl$path").header("Authorization", "Bearer ${token!!}")
 
+    /**
+     * Learn which optional features this instance actually mounted
+     * (`GET /api/config`, unauthenticated). Refreshed on every connect, because an
+     * operator can enable one without the app restarting.
+     *
+     * Best-effort and deliberately non-blocking: a flag that decides whether to
+     * DECORATE a message must never delay GETTING the message. On failure the map
+     * is left alone and everything gated on it stays hidden.
+     */
+    fun fetchServerConfig() = io.execute {
+        runCatching {
+            http.newCall(Request.Builder().url("$baseUrl/api/config").build()).execute().use { res ->
+                if (!res.isSuccessful) return@execute
+                val feats = JSONObject(res.body?.string().orEmpty()).optJSONObject("features")
+                    ?: return@execute
+                val fresh = feats.keys().asSequence().associateWith { feats.optBoolean(it, false) }
+                post { serverFeatureFlags.clear(); serverFeatureFlags.putAll(fresh) }
+            }
+        }
+    }
+
     private fun fetchNetworkNames() {
         try {
             http.newCall(authed("/api/networks").build()).execute().use { res ->
@@ -766,6 +804,7 @@ open class LurkerClient {
                     connecting = false
                     status = null
                     backoffMs = INITIAL_BACKOFF
+                    fetchServerConfig() // which optional features this instance has
                 }
             }
 
@@ -3058,6 +3097,7 @@ open class LurkerClient {
             choices = choices,
             min = if (o.has("min")) o.optInt("min") else null,
             max = if (o.has("max")) o.optInt("max") else null,
+            requiresFeature = o.optString("requiresFeature").ifEmpty { null },
         )
     }
 
