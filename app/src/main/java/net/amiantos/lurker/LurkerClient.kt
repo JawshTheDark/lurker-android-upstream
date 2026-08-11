@@ -401,6 +401,19 @@ open class LurkerClient {
     @Volatile private var ws: WebSocket? = null
     private var token: String? = null
     private var baseUrl: String = ""
+
+    /** This instance's base URL, for resolving server-minted byte paths. */
+    val serverBaseUrl: String get() = baseUrl
+
+    /**
+     * The session token, for byte requests aimed at THIS instance only.
+     *
+     * Named for its one legitimate caller rather than exposed as `token`, because
+     * the mistake it guards against — attaching Authorization to a byte URL that
+     * turned out to be an absolute CDN address — leaks the session into a third
+     * party's access log once per image. See [previewMediaTarget].
+     */
+    val tokenForMedia: String? get() = token
     protected val networkNames = mutableMapOf<Int, String>()
 
     private var prefs: Prefs? = null
@@ -534,6 +547,10 @@ open class LurkerClient {
 
     /** Tear down the session: close the socket, forget the token, reset state. */
     open fun signOut() {
+        // Wipe preview state with the session: an in-air response must not refill
+        // the store we just emptied, which would put the previous account's
+        // metadata back in cache and POST its URLs under the next account's token.
+        ServerPreviews.store.reset()
         intentionalClose = true
         started = false
         ws?.close(1000, "sign out")
@@ -694,6 +711,41 @@ open class LurkerClient {
 
     private fun authed(path: String): Request.Builder =
         Request.Builder().url("$baseUrl$path").header("Authorization", "Bearer ${token!!}")
+
+    /**
+     * Resolve a batch of URLs server-side (`POST /api/link-preview/resolve`).
+     *
+     * [onDone] receives the descriptors, or null on a TRANSPORT failure — which the
+     * store must treat as "no information about these URLs", never as a verdict.
+     * Conflating the two is what strands links blank for a whole session.
+     *
+     * Max 20 URLs per request (extra are dropped from the response, so batch at
+     * 20); 120 requests/min per account.
+     */
+    fun resolvePreviews(urls: List<String>, onDone: (List<ServerLinkPreview>?) -> Unit) {
+        if (urls.isEmpty()) { onDone(emptyList()); return }
+        io.execute {
+            val out = runCatching {
+                val body = JSONObject().put("urls", JSONArray(urls.take(20)))
+                    .toString().toRequestBody(json)
+                http.newCall(authed("/api/link-preview/resolve").post(body).build()).execute().use { res ->
+                    if (res.code == 429) {
+                        DebugLog.w("preview", "rate limited; retry-after=${res.header("Retry-After")}")
+                        return@runCatching null
+                    }
+                    if (!res.isSuccessful) return@runCatching null
+                    val arr = JSONObject(res.body?.string().orEmpty()).optJSONArray("previews")
+                        ?: return@runCatching emptyList()
+                    // Drop an undecodable descriptor individually rather than
+                    // failing the whole batch it arrived in.
+                    (0 until arr.length()).mapNotNull { i ->
+                        arr.optJSONObject(i)?.let { runCatching { parseServerPreview(it) }.getOrNull() }
+                    }
+                }
+            }.getOrNull()
+            post { onDone(out) }
+        }
+    }
 
     /**
      * Learn which optional features this instance actually mounted

@@ -418,6 +418,9 @@ class MainActivity : FragmentActivity() {
                 // session can't grow it without bound. Saved too, or a rotate would
                 // strand you with a Back that jumps straight to the buffer list.
                 val backStack = rememberSaveable(saver = BackStackSaver) { mutableStateListOf<Screen>() }
+                // One pump for the whole app: pacing is a global property, so a
+                // per-row pump would be twenty pumps racing the same rate limit.
+                ServerPreviewPump(client)
                 // Re-focus a chat we RESTORED (rotation or a process-death relaunch).
                 // Guarded on the client's current focus: rotation keeps it already
                 // set, and re-running setActive would re-anchor the "New messages"
@@ -3705,7 +3708,13 @@ private fun MessageBubble(
             }
         }
         // OpenGraph / YouTube preview cards for non-media links (own Settings toggles).
-        if (onLink != null) LinkPreviewCards(msg.text, onLink)
+        // Lurker mode resolves previews SERVER-side (the reader never contacts the
+        // linked host). Direct-IRC mode has no server, so it keeps the on-device
+        // scraper — see ServerPreview.kt for why that distinction matters.
+        if (onLink != null) {
+            if (ServerPreviews.enabled) ServerPreviewCards(msg, onLink)
+            else LinkPreviewCards(msg.text, onLink)
+        }
             // Timestamps are hidden here and revealed by swiping left (iMessage
             // style) — see the reveal overlay + drag above. Keeps the timeline
             // dense (d3fc0n1) while per-message times stay one gesture away.
@@ -3787,7 +3796,13 @@ private fun CompactMessageRow(
                 }
             }
         }
-        if (onLink != null) LinkPreviewCards(msg.text, onLink)
+        // Lurker mode resolves previews SERVER-side (the reader never contacts the
+        // linked host). Direct-IRC mode has no server, so it keeps the on-device
+        // scraper — see ServerPreview.kt for why that distinction matters.
+        if (onLink != null) {
+            if (ServerPreviews.enabled) ServerPreviewCards(msg, onLink)
+            else LinkPreviewCards(msg.text, onLink)
+        }
     }
 }
 
@@ -4073,7 +4088,13 @@ private fun MultichanBubbleRow(
                 }
             }
         }
-        if (onLink != null) LinkPreviewCards(msg.text, onLink)
+        // Lurker mode resolves previews SERVER-side (the reader never contacts the
+        // linked host). Direct-IRC mode has no server, so it keeps the on-device
+        // scraper — see ServerPreview.kt for why that distinction matters.
+        if (onLink != null) {
+            if (ServerPreviews.enabled) ServerPreviewCards(msg, onLink)
+            else LinkPreviewCards(msg.text, onLink)
+        }
     }
 }
 
@@ -4122,7 +4143,13 @@ private fun MultichanCompactRow(
                 }
             }
         }
-        if (onLink != null) LinkPreviewCards(msg.text, onLink)
+        // Lurker mode resolves previews SERVER-side (the reader never contacts the
+        // linked host). Direct-IRC mode has no server, so it keeps the on-device
+        // scraper — see ServerPreview.kt for why that distinction matters.
+        if (onLink != null) {
+            if (ServerPreviews.enabled) ServerPreviewCards(msg, onLink)
+            else LinkPreviewCards(msg.text, onLink)
+        }
     }
 }
 
@@ -4986,9 +5013,14 @@ private fun SettingsScreen(client: LurkerClient, prefs: Prefs, onBack: () -> Uni
                 // Device-local settings always render — they're this device's Prefs,
                 // not the server's registry, so they exist in direct mode too.
                 item { ThemePickerCard(prefs) }
-                item { InlineMediaCard(prefs) }
-                item { LinkPreviewsCard(prefs) }
-                item { YoutubeDescriptionsCard(prefs) }
+                // Device-local preview toggles belong to the ON-DEVICE scraper. In
+                // Lurker mode the server-side registry settings govern instead, and
+                // showing both would be two controls for one behaviour.
+                if (!ServerPreviews.enabled) {
+                    item { InlineMediaCard(prefs) }
+                    item { LinkPreviewsCard(prefs) }
+                    item { YoutubeDescriptionsCard(prefs) }
+                }
                 item { TranslationCard(prefs) }
                 item { ClockFormatCard(prefs) }
                 item { CompactMessagesCard(prefs) }
@@ -5183,7 +5215,8 @@ private fun LinkPreviewsCard(prefs: Prefs) {
             Column(Modifier.weight(1f)) {
                 Text("Link previews", fontSize = 17.sp)
                 Text(
-                    "Show a title, description & image card under pasted links. Fetches the page from its site.",
+                    "Show a title, description & image card under pasted links. " +
+                        "This device fetches the page, so the linked site sees your address.",
                     color = TextSecondary,
                     fontSize = 12.sp,
                 )
