@@ -3697,7 +3697,11 @@ private fun MessageBubble(
         }
         // Inline media thumbnails (device-local toggle). Tap → the full viewer via
         // the same onLink route that already handles media URLs.
-        if (Ui.inlineMedia && onLink != null) {
+        // NOT when the server resolves previews: those same URLs come back as
+        // `image`/`video` descriptors and render in the block below, so running
+        // this too drew every picture and clip TWICE (d3fc0n). Page links were
+        // unaffected, which is why it only ever looked like a media bug.
+        if (!ServerPreviews.enabled && Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
                 when (kind) {
@@ -3786,7 +3790,11 @@ private fun CompactMessageRow(
             .padding(horizontal = 12.dp, vertical = (1.5f * Ui.densityScale).dp),
     ) {
         Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary, fontFamily = Ui.chatFont)
-        if (Ui.inlineMedia && onLink != null) {
+        // NOT when the server resolves previews: those same URLs come back as
+        // `image`/`video` descriptors and render in the block below, so running
+        // this too drew every picture and clip TWICE (d3fc0n). Page links were
+        // unaffected, which is why it only ever looked like a media bug.
+        if (!ServerPreviews.enabled && Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
                 when (kind) {
@@ -4078,7 +4086,11 @@ private fun MultichanBubbleRow(
                 fontFamily = Ui.chatFont,
             )
         }
-        if (Ui.inlineMedia && onLink != null) {
+        // NOT when the server resolves previews: those same URLs come back as
+        // `image`/`video` descriptors and render in the block below, so running
+        // this too drew every picture and clip TWICE (d3fc0n). Page links were
+        // unaffected, which is why it only ever looked like a media bug.
+        if (!ServerPreviews.enabled && Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
                 when (kind) {
@@ -4133,7 +4145,11 @@ private fun MultichanCompactRow(
             .padding(horizontal = 12.dp, vertical = 1.5.dp),
     ) {
         Text(line, fontSize = baseSize.sp, lineHeight = (baseSize + 3).sp, color = TextPrimary, fontFamily = Ui.chatFont)
-        if (Ui.inlineMedia && onLink != null) {
+        // NOT when the server resolves previews: those same URLs come back as
+        // `image`/`video` descriptors and render in the block below, so running
+        // this too drew every picture and clip TWICE (d3fc0n). Page links were
+        // unaffected, which is why it only ever looked like a media bug.
+        if (!ServerPreviews.enabled && Ui.inlineMedia && onLink != null) {
             val embeds = remember(msg.text) { mediaUrlsIn(msg.text) }
             embeds.forEach { (url, kind) ->
                 when (kind) {
