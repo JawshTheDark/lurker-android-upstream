@@ -30,6 +30,20 @@ class TranslateTest {
         listOf(":)", "?!", "+1", "", "   ", "👍", "o/").forEach { assertTrue("[$it]", isSkippable(it)) }
     }
 
+    @Test fun `a message that is only a link is skipped`() {
+        // A URL is full of letters, so the letter-count test waves it through —
+        // and the translator scores it 0.0 confidence and hands the address back.
+        // These are the exact messages that spammed the log (d3fc0n's uploads).
+        assertTrue(isSkippable("https://pics.pcola.net/i/xUQMZtdNilrsNYVLdN96rpjWOQW.jpg"))
+        assertTrue(isSkippable("https://pics.pcola.net/i/kq8KIlNEjBG7BDiL6AlFUMwLniH4.mp4"))
+        assertTrue(isSkippable("  https://example.com/a  https://example.com/b "))
+    }
+
+    @Test fun `a link WITH prose is still translated`() {
+        // Only the link is noise; the sentence around it is the point.
+        assertFalse(isSkippable("schau dir das an https://example.com/a"))
+    }
+
     @Test fun `real sentences are not skipped`() {
         listOf(
             "cual es tu pitufo favorito?",

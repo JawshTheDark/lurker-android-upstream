@@ -43,6 +43,11 @@ data class Translation(val text: String, val lang: String?)
 private sealed interface TEntry {
     data object InFlight : TEntry
     data class Done(val text: String, val lang: String?) : TEntry
+
+    /** Asked, and the answer is "nothing to render" — a low-confidence detection
+     *  or a result identical to the input. A VERDICT: caching it is what stops the
+     *  re-ask loop that a dropped entry would cause on every recomposition. */
+    data object None : TEntry
 }
 
 object Translator {
@@ -80,18 +85,24 @@ object Translator {
         mu.withLock {
             if (cache.containsKey(msg.id)) return
             cache[msg.id] = TEntry.InFlight
-            val out = withContext(Dispatchers.IO) { runCatching { translate(msg.text, target) } }
+            // gate = true: for INCOMING, a low-confidence detection means we'd be
+            // translating from the wrong source and the answer is neither language.
+            val out = withContext(Dispatchers.IO) {
+                runCatching { translate(msg.text, target, gateConfidence = true) }
+            }
             locks.remove(msg.id)
-            val t = out.getOrNull()
-            if (t == null) {
-                // DROP the entry on failure rather than caching a miss: a translator
-                // that was down for a minute must not strand every message from that
-                // minute until the app restarts. Renders only happen when something
-                // changes, so this doesn't hammer a dead endpoint either.
+            if (out.isFailure) {
+                // TRANSIENT (transport/HTTP). Drop the entry so a translator that
+                // was down for a minute doesn't strand every message from that
+                // minute until the app restarts.
                 cache.remove(msg.id)
                 DebugLog.e("translate", "failed for msg ${msg.id}: ${out.exceptionOrNull()?.message}")
             } else {
-                cache[msg.id] = TEntry.Done(t.text, t.lang)
+                // DEFINITIVE, including "nothing worth showing" — cache it either
+                // way, or every recomposition re-asks about the same message
+                // forever (a URL-only line scores 0.0 and would loop endlessly).
+                val t = out.getOrNull()
+                cache[msg.id] = if (t != null) TEntry.Done(t.text, t.lang) else TEntry.None
             }
         }
     }
@@ -106,16 +117,25 @@ object Translator {
     /** Translate [text] into [target]. Throws on transport/protocol failure so the
      *  caller can decline to cache it. */
     suspend fun translateNow(text: String, target: String): Translation =
-        withContext(Dispatchers.IO) { translate(text, target) }
+        withContext(Dispatchers.IO) {
+            // gate = false: POSTING picks the target explicitly, so how confidently
+            // the server guessed the SOURCE is irrelevant. Short sentences score
+            // low routinely — "Not a problem my friend." scores 43 and still
+            // translates correctly — and gating them made them unsendable.
+            translate(text, target, gateConfidence = false)
+                ?: throw java.io.IOException("no translation")
+        }
 
-    private fun translate(text: String, target: String): Translation =
+    /** Throws on a TRANSIENT failure; returns null when the answer is definitively
+     *  "nothing to show". The two are different and must stay different. */
+    private fun translate(text: String, target: String, gateConfidence: Boolean): Translation? =
         when (Ui.translateBackend) {
-            TranslateBackend.LIBRETRANSLATE -> libre(text, target)
+            TranslateBackend.LIBRETRANSLATE -> libre(text, target, gateConfidence)
             TranslateBackend.OPENAI -> openai(text, target)
             TranslateBackend.OFF -> throw IllegalStateException("translation off")
         }
 
-    private fun libre(text: String, target: String): Translation {
+    private fun libre(text: String, target: String, gateConfidence: Boolean): Translation? {
         val body = JSONObject()
             .put("q", text)
             .put("source", "auto")
@@ -137,7 +157,9 @@ object Translator {
             // Below the gate the DETECTION is wrong, which means we translated from
             // the wrong source and the answer is neither language. Short informal
             // Spanish scored 57 as Italian in the field; clean speech scores 85+.
-            if (confidence < CONFIDENCE_GATE) throw java.io.IOException("low confidence $confidence")
+            // Not an error — a verdict. Render the original, untouched and
+            // unbadged, and don't come back.
+            if (gateConfidence && confidence < CONFIDENCE_GATE) return null
             return Translation(out, lang)
         }
     }
@@ -202,7 +224,13 @@ private val INTERJECTIONS = setOf(
  * interjections ("loooool" collapses to "lol").
  */
 internal fun isSkippable(text: String): Boolean {
-    val t = text.trim()
+    // Strip URLs FIRST. A message that is just a link has nothing to translate,
+    // but a URL is full of letters so the letter-count test below waves it
+    // through — and the translator scores it 0.0 confidence and hands the address
+    // straight back. Uses Mirc.findUrls, the same parser the renderer links with.
+    var stripped = text
+    for (r in Mirc.findUrls(text).asReversed()) stripped = stripped.removeRange(r)
+    val t = stripped.trim()
     if (t.isEmpty()) return true
     // Anything with almost no letters — ":)", "?!", "+1", a bare emoji.
     if (t.count { it.isLetter() } <= 2) return true
