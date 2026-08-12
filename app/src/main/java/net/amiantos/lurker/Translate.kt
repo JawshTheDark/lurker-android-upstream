@@ -4,6 +4,9 @@
 package net.amiantos.lurker
 
 import androidx.compose.runtime.mutableStateMapOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -78,31 +81,55 @@ object Translator {
     fun done(id: Long): Translation? =
         (cache[id] as? TEntry.Done)?.let { Translation(it.text, it.lang) }
 
+    /**
+     * Requests outlive the row that asked for them.
+     *
+     * This used to run inside the calling row's LaunchedEffect, which a LazyColumn
+     * CANCELS as soon as that row scrolls out of view. Cancellation unwinds out of
+     * `withContext` — past the runCatching, which sat inside it — so the
+     * bookkeeping after the call never ran and the entry stayed pinned at
+     * InFlight. A cached entry short-circuits the request, so that message could
+     * then never be translated again for the life of the session. It presented as
+     * "some messages translate and some just don't", depending on which rows
+     * happened to churn while their request was still in the air.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /** Kick off a translation for [msg] if one isn't cached or already running. */
-    suspend fun ensure(msg: Msg, target: String) {
+    fun ensure(msg: Msg, target: String) {
         if (msg.id <= 0 || cache.containsKey(msg.id)) return
-        val mu = locks.getOrPut(msg.id) { Mutex() }
-        mu.withLock {
-            if (cache.containsKey(msg.id)) return
-            cache[msg.id] = TEntry.InFlight
-            // gate = true: for INCOMING, a low-confidence detection means we'd be
-            // translating from the wrong source and the answer is neither language.
-            val out = withContext(Dispatchers.IO) {
-                runCatching { translate(msg.text, target, gateConfidence = true) }
-            }
-            locks.remove(msg.id)
-            if (out.isFailure) {
-                // TRANSIENT (transport/HTTP). Drop the entry so a translator that
-                // was down for a minute doesn't strand every message from that
-                // minute until the app restarts.
-                cache.remove(msg.id)
-                DebugLog.e("translate", "failed for msg ${msg.id}: ${out.exceptionOrNull()?.message}")
-            } else {
-                // DEFINITIVE, including "nothing worth showing" — cache it either
-                // way, or every recomposition re-asks about the same message
-                // forever (a URL-only line scores 0.0 and would loop endlessly).
-                val t = out.getOrNull()
-                cache[msg.id] = if (t != null) TEntry.Done(t.text, t.lang) else TEntry.None
+        scope.launch {
+            val mu = locks.getOrPut(msg.id) { Mutex() }
+            mu.withLock {
+                if (cache.containsKey(msg.id)) return@withLock
+                cache[msg.id] = TEntry.InFlight
+                var settled = false
+                try {
+                    // gate = true: for INCOMING, a low-confidence detection means
+                    // we'd be translating from the wrong source, and the answer
+                    // would be in neither language.
+                    val out = runCatching { translate(msg.text, target, gateConfidence = true) }
+                    if (out.isFailure) {
+                        // TRANSIENT (transport/HTTP). Drop the entry so a translator
+                        // that was down for a minute doesn't strand every message
+                        // from that minute until the app restarts.
+                        cache.remove(msg.id)
+                        DebugLog.e("translate", "failed for msg ${msg.id}: ${out.exceptionOrNull()?.message}")
+                    } else {
+                        // DEFINITIVE, including "nothing worth showing" — cache it
+                        // either way, or every recomposition re-asks about the same
+                        // message forever (a URL-only line scores 0.0 and loops).
+                        val t = out.getOrNull()
+                        cache[msg.id] = if (t != null) TEntry.Done(t.text, t.lang) else TEntry.None
+                    }
+                    settled = true
+                } finally {
+                    locks.remove(msg.id)
+                    // Belt and braces: anything that unwinds without reaching a
+                    // verdict must not leave the entry pinned, or this message is
+                    // stuck untranslated forever.
+                    if (!settled) cache.remove(msg.id)
+                }
             }
         }
     }

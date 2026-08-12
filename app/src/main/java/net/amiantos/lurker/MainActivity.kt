@@ -1930,25 +1930,6 @@ private fun BufferRow(
     }
 }
 
-/** Marks a row whose text we replaced with a translation. Carries the DETECTED
- *  source language so a reader knows which language to answer in (d3fc0n asked
- *  for this in-channel); LLM backends return no detection, so they get a bare
- *  globe. Only truly-changed rows are badged — an identical answer means it was
- *  already in the target language, and a badge there would lie. */
-@Composable
-private fun TranslatedBadge(lang: String?, baseSize: Int) {
-    Text(
-        if (lang != null) "🌐$lang" else "🌐",
-        color = AccentBlue,
-        fontSize = (baseSize - 5).sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier
-            .clip(RoundedCornerShape(5.dp))
-            .background(AccentBlue.copy(alpha = 0.14f))
-            .padding(horizontal = 4.dp, vertical = 1.dp),
-    )
-}
-
 @Composable
 private fun UnreadBadge(count: Int, highlight: Boolean) {
     Box(
@@ -3632,10 +3613,6 @@ private fun MessageBubble(
                     Spacer(Modifier.width(6.dp))
                     LockGlyph(color = OnlineGreen, size = (baseSize - 5).dp)
                 }
-                translation?.let {
-                    Spacer(Modifier.width(6.dp))
-                    TranslatedBadge(it.lang, baseSize)
-                }
             }
         }
         // A message fully painted with one mIRC background becomes a bubble of
@@ -3677,8 +3654,21 @@ private fun MessageBubble(
             // previews below) keeps reading msg.text, so a translator can't
             // re-spell a URL out from under them.
             val shown = translation?.text ?: msg.text
-            val body = remember(shown, linkColor, onLink != null, onChannel != null) {
+            val parsed = remember(shown, linkColor, onLink != null, onChannel != null) {
                 mircAnnotated(shown, linkColor, onLink, onChannel)
+            }
+            // Badge INLINE, not in the group header: the header renders only on the
+            // first message of a sender's run, so badging there left every
+            // following translated message unmarked — a whole block of foreign
+            // messages showed a single badge somewhere in the middle of it.
+            val body = if (translation == null) parsed else buildAnnotatedString {
+                withStyle(
+                    SpanStyle(
+                        color = if (self) Color.White.copy(alpha = 0.75f) else AccentBlue,
+                        fontSize = (baseSize - 4).sp,
+                    ),
+                ) { append("🌐" + (translation.lang ?: "") + " ") }
+                append(parsed)
             }
             Text(
                 if (msg.type == "error") buildAnnotatedString {
