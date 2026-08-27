@@ -4484,9 +4484,20 @@ private fun TypingBubble(nicks: List<String>) {
             .fillMaxWidth()
             .padding(start = 12.dp, end = 64.dp, top = 8.dp, bottom = 2.dp),
     ) {
+        // Each nick keeps ITS OWN colour, the same one it has in the message list
+        // and the roster. Joining the names into one string painted them all with
+        // the FIRST nick's colour, so "d3fc0n, freakyy85" showed a green freakyy85
+        // — the one place in the app where a nick's colour lied about who it was.
+        val line = remember(nicks, Ui.nickColors) {
+            buildAnnotatedString {
+                nicks.forEachIndexed { i, nick ->
+                    if (i > 0) withStyle(SpanStyle(color = TextSecondary)) { append(", ") }
+                    withStyle(SpanStyle(color = nickColor(nick))) { append(nick) }
+                }
+            }
+        }
         Text(
-            nicks.joinToString(", "),
-            color = nickColor(nicks.first()),
+            line,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(start = 14.dp, bottom = 2.dp),
