@@ -4571,6 +4571,19 @@ private fun SystemLine(msg: Msg, onJoin: ((String) -> Unit)? = null) {
         )
         return
     }
+    if (msg.type == "error") {
+        // Server-voice failure ("gnat isn't on this network.", a rejected
+        // command). Red like a failed send, left-aligned because these read as
+        // sentences and can run long; through the mIRC renderer since ircd
+        // text occasionally carries format codes.
+        Text(
+            mircAnnotated(msg.text, AccentBlue),
+            fontSize = 13.sp,
+            color = AlertRed,
+            modifier = Modifier.fillMaxWidth().padding(24.dp, 6.dp),
+        )
+        return
+    }
     if (msg.type == "send-failed") {
         Text(
             msg.text,

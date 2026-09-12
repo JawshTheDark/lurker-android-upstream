@@ -2153,7 +2153,7 @@ open class LurkerClient {
         if (e.optBoolean("fromIgnored", false)) return null
         val type = e.optString("type")
         val id = e.optLong("id")
-        val nick = e.optString("nick", "*")
+        val nick = eventNick(e)
         val text = e.optString("text")
         // Automated TAGMSG/BATCH "unknown command" bounces: a typing notification
         // (client-only tag carried over TAGMSG) that a network without the
@@ -2168,13 +2168,23 @@ open class LurkerClient {
             return null
         }
         return when (type) {
-            "message", "action", "notice", "error" -> Msg(
+            "message", "action", "notice" -> Msg(
                 id = id, type = type, nick = nick, text = text,
                 self = e.optBoolean("self", false), time = e.optString("time").ifEmpty { null },
                 // Persisted flag: the message rode E2E (server already decrypted it).
                 e2e = e.optBoolean("e2e", false),
                 // Highlight rule hit (a mention / your nick) — gold background.
                 matched = e.optBoolean("matched", false),
+            )
+            // The server's own voice: a 401 routed into a channel or DM ("gnat
+            // isn't on this network."), a rejected command, an ircd error. It has
+            // no author, so it is a system line, never a bubble with a sender
+            // header — the shape DirectIrcBackend already uses for its error rows,
+            // and how Scully draws them (a `!!` marker, not the nick column).
+            "error" -> Msg(
+                id = id, type = type, nick = nick, text = text,
+                self = false, time = e.optString("time").ifEmpty { null },
+                system = true,
             )
             // Ephemeral E2E status/handshake line: rendered as a tagged system
             // line (green info / red warn), never persisted. No crypto involved.
@@ -3233,6 +3243,18 @@ internal fun relayNotifyNetwork(
     }
     return null
 }
+
+/**
+ * The sender of an event row, `*` when it has none.
+ *
+ * Android's org.json turns a PRESENT-but-null value into the string "null";
+ * `optString`'s fallback only covers an ABSENT key. Server-voice rows — a
+ * persisted `error` above all — come back from history with `nick: null`, so
+ * "gnat isn't on this network." rendered under a sender called "null"
+ * (stephanos, #lurker). `isNull` is true for absent and null alike.
+ */
+internal fun eventNick(e: JSONObject): String =
+    if (e.isNull("nick")) "*" else e.optString("nick", "*")
 
 internal fun shouldNotify(
     notify: Boolean,
