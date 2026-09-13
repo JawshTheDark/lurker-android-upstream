@@ -126,6 +126,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.withStyle
 import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
@@ -400,6 +401,7 @@ class MainActivity : FragmentActivity() {
         }
         consumeShareIntent(intent)
         consumeNotificationIntent(intent)
+        consumeOAuthIntent(intent)
         // Opt-in always-on: revive the liveness anchor on launch (from the
         // foreground, so the background-start rule never bites).
         if (prefs.backgroundConnect && prefs.hasSession) LurkerConnectionService.start(this)
@@ -684,6 +686,17 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         consumeShareIntent(intent)
         consumeNotificationIntent(intent)
+        consumeOAuthIntent(intent)
+    }
+
+    /** The browser's OAuth redirect, forwarded by [OAuthRedirectActivity]:
+     *  `<applicationId>:/oauth?code=…`. Finishes sign-in off the main thread. */
+    private fun consumeOAuthIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (intent.action != Intent.ACTION_VIEW || !data.scheme.equals(packageName, ignoreCase = true)) return
+        intent.data = null // consume so a config change doesn't replay (and re-spend) the code
+        val uri = data.toString()
+        Thread { client.completeOAuth(uri) }.start()
     }
 
     /** Relaunch the app in a fresh process so LurkerApp re-creates its lazy
@@ -1316,7 +1329,8 @@ private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
     var showPw by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val canSubmit = server.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !client.authBusy
+    val canSubmit = server.isNotBlank() && username.isNotBlank() && password.isNotBlank() &&
+        !client.authBusy && !client.oauthWaiting
     fun submit() {
         if (!canSubmit) return
         scope.launch { withContext(Dispatchers.IO) { client.login(server, username, password) } }
@@ -1355,8 +1369,61 @@ private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
                 color = TextSecondary, fontSize = 11.sp,
                 modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 3.dp),
             )
+            Spacer(Modifier.height(18.dp))
+
+            // Browser sign-in (Lurker 2.3+ OAuth): the server's own page does the
+            // authenticating — password or passkey — and the app only ever holds
+            // the resulting token. Preferred; the password form below stays for
+            // older servers, which beginOAuth detects and says so.
+            var viaBrowser by remember { mutableStateOf(false) }
+            if (client.oauthWaiting) {
+                Text(
+                    "Finish signing in in your browser, then come back here.",
+                    color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(10.dp))
+                CircularProgressIndicator(Modifier.size(20.dp), color = AccentBlue, strokeWidth = 2.dp)
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = { client.cancelOAuth() }) {
+                    Text("Cancel", color = AccentBlue, fontSize = 14.sp)
+                }
+            } else {
+                Button(
+                    onClick = {
+                        viaBrowser = true
+                        scope.launch {
+                            val url = withContext(Dispatchers.IO) { client.beginOAuth(server) }
+                            if (url != null) {
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                } catch (_: ActivityNotFoundException) {
+                                    client.cancelOAuth("No web browser is installed to sign in with.")
+                                }
+                            }
+                        }
+                    },
+                    enabled = server.isNotBlank() && !client.authBusy,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                ) {
+                    if (client.authBusy && viaBrowser) {
+                        CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Text("Sign in with browser", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Text(
+                    "Opens your server's sign-in page. Works with passkeys, and your password never enters the app.",
+                    color = TextSecondary, fontSize = 11.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
+            HorizontalDivider(color = GlassBorder, modifier = Modifier.fillMaxWidth(0.6f))
+            Spacer(Modifier.height(8.dp))
+            Text("Or sign in with a password", color = TextSecondary, fontSize = 12.sp)
             Spacer(Modifier.height(12.dp))
-            FormField(if (hosted) "Email" else "Username", username) { username = it; client.clearAuthError() }
+            FormField(if (hosted) "Email" else "Username", username) { username = it; viaBrowser = false; client.clearAuthError() }
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = password,
@@ -1385,7 +1452,7 @@ private fun LoginScreen(client: LurkerClient, prefs: Prefs) {
                 enabled = canSubmit,
                 modifier = Modifier.fillMaxWidth().height(50.dp),
             ) {
-                if (client.authBusy) {
+                if (client.authBusy && !viaBrowser) {
                     CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
                 } else {
                     Text("Sign in", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)

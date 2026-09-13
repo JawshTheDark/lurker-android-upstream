@@ -34,6 +34,27 @@ class Prefs(context: Context) {
 
     val hasSession: Boolean get() = !token.isNullOrEmpty() && !serverUrl.isNullOrEmpty()
 
+    /** This install's identity for OAuth: the application id is the redirect
+     *  scheme (per flavor, so the two installs don't catch each other's
+     *  redirects) and the launcher label is what the approval page shows. */
+    val appId: String = context.applicationContext.packageName
+    val appName: String = context.applicationContext.getString(R.string.app_name)
+
+    /** The `client_id` Lurker issued us for one server. Kept per server and
+     *  reused (OAUTH.md: an approved app's registration is permanent; one
+     *  nobody approved is deleted after an hour). Null = register again. */
+    fun oauthClientId(base: String): String? = sp.getString("oauthClient:$base", null)
+    fun setOauthClientId(base: String, id: String?) = sp.edit {
+        if (id == null) remove("oauthClient:$base") else putString("oauthClient:$base", id)
+    }
+
+    /** The authorization in flight ([OAuthPending] as JSON) while the member is
+     *  off in the browser. Persisted because the browser is another app and
+     *  ours may be killed before the redirect brings them back. */
+    var oauthPending: String?
+        get() = sp.getString("oauthPending", null)
+        set(v) = sp.edit(commit = true) { if (v == null) remove("oauthPending") else putString("oauthPending", v) }
+
     /** Which backend to run: "lurker" (WebSocket to a Lurker server) or "direct"
      *  (raw IRC / bouncer via KICL). null = first run → mode picker. */
     var clientMode: String?

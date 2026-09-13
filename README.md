@@ -103,10 +103,14 @@ adb install -r app/build/outputs/apk/full/debug/app-full-debug.apk
 Release signing for the Play build reads a gitignored `keystore.properties`; absent it (fresh clone),
 release falls back to debug signing so the build still succeeds.
 
-To sign in, point it at your server: the hosted app is `lurker.chat` (email login), a self-hosted
-server is its address (username login — use the **API** port, `8010` by default, not the web dev
-port). From the emulator the host machine is `10.0.2.2`, not `localhost`. Cleartext HTTP is permitted
-for local dev servers.
+To sign in, point it at your server: the hosted app is `lurker.chat`, a self-hosted server is its
+address (use the **API** port, `8010` by default, not the web dev port). On Lurker 2.3+ **Sign in with
+browser** is the default: the app registers itself with the server as an OAuth client (PKCE, no
+secret), the server's own page authenticates you — password or passkey — and the app only ever
+holds the resulting token. The redirect comes back on the application id as a custom scheme
+(`chat.irc.lurker:/oauth`), so the two flavors don't intercept each other. Older servers get the
+username/password form (hosted: email + control-plane mint). From the emulator the host machine is
+`10.0.2.2`, not `localhost`. Cleartext HTTP is permitted for local dev servers.
 
 ## Security notes
 

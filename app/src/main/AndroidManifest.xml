@@ -42,6 +42,23 @@
             </intent-filter>
         </activity>
 
+        <!-- Browser sign-in (Lurker 2.3+ OAuth) comes back to the app on the
+             application id as a custom scheme: chat.irc.lurker:/oauth?code=…
+             Invisible; it forwards the redirect into MainActivity and finishes. -->
+        <activity
+            android:name=".OAuthRedirectActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${applicationId}" />
+            </intent-filter>
+        </activity>
+
         <!-- Grants the camera app a write URI for the in-composer "Take photo"
              capture; authority is per-flavor so both identities coexist. -->
         <provider

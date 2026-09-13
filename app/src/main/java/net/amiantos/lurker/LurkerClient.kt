@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import android.os.Handler
 import android.os.Looper
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -635,6 +636,175 @@ open class LurkerClient {
             draftFlush.values.forEach(main::removeCallbacks)
             draftFlush.clear()
         }
+    }
+
+    // ---- Browser sign-in (OAuth, Lurker 2.3+) ------------------------------
+
+    /** True from the moment the browser is opened until the redirect comes back
+     *  or the user cancels: the login screen shows "finish in your browser". */
+    var oauthWaiting by mutableStateOf(false)
+
+    /**
+     * Step 1 of browser sign-in. Discovers the server's OAuth endpoints,
+     * registers this app there if it hasn't been, mints a PKCE pair, persists
+     * the attempt, and returns the URL to open in the browser — or null after
+     * setting [authError]. Blocking; the caller runs it off the main thread.
+     *
+     * Hosted (lurker.chat) is the same flow against app.lurker.chat (CLIENT_PROTOCOL
+     * §3.2); only the password path needs the control-plane special case.
+     */
+    fun beginOAuth(rawBase: String): String? {
+        val p = prefs ?: return null
+        val base = if (isHostedLurker(rawBase)) HOSTED_LURKER_BASE else normalizeServerUrl(rawBase)
+        post { authBusy = true; authError = null; status = null }
+        fun fail(msg: String): String? {
+            post { authError = msg; authBusy = false }
+            return null
+        }
+        try {
+            // RFC 8414 discovery. A pre-2.3 server has no such route and answers
+            // with the web app's HTML (a 200 that isn't JSON) — same verdict as a
+            // 404: no browser sign-in here, use the password form.
+            val disco = getJson("$base/.well-known/oauth-authorization-server")
+                ?: return fail("This server doesn't offer browser sign-in yet (it needs Lurker 2.3 or newer). Sign in with your username and password below.")
+            val authorizeEp = disco.optString("authorization_endpoint")
+            val tokenEp = disco.optString("token_endpoint")
+            val registerEp = disco.optString("registration_endpoint")
+            if (authorizeEp.isEmpty() || tokenEp.isEmpty() || registerEp.isEmpty()) {
+                return fail("This server's sign-in setup is incomplete (no OAuth endpoints advertised).")
+            }
+            val redirect = OAuth.redirectUri(p.appId)
+            val clientId = p.oauthClientId(base) ?: run {
+                // RFC 7591 dynamic registration: public client, no secret.
+                val body = JSONObject()
+                    .put("client_name", p.appName.take(60))
+                    .put("client_uri", OAuth.CLIENT_URI)
+                    .put("redirect_uris", JSONArray().put(redirect))
+                    .toString().toRequestBody(json)
+                http.newCall(Request.Builder().url(registerEp).post(body).build()).execute().use { res ->
+                    val text = res.body?.string().orEmpty()
+                    if (res.code == 429) {
+                        return fail("The server is rate-limiting app registrations right now. Try again in a few minutes.")
+                    }
+                    val id = runCatching { JSONObject(text).optString("client_id") }.getOrNull()
+                    if (!res.isSuccessful || id.isNullOrEmpty()) {
+                        val why = runCatching { JSONObject(text).optString("error_description") }.getOrNull()
+                        return fail("The server refused to register this app" + (why?.takeIf { it.isNotEmpty() }?.let { ": $it" } ?: " (HTTP ${res.code})."))
+                    }
+                    p.setOauthClientId(base, id)
+                    id
+                }
+            }
+            val verifier = OAuth.newVerifier()
+            val state = OAuth.newState()
+            p.oauthPending = OAuthPending(
+                base = base, clientId = clientId, redirectUri = redirect,
+                verifier = verifier, state = state, tokenEndpoint = tokenEp,
+            ).toJson()
+            baseUrl = base
+            post { authBusy = false; oauthWaiting = true }
+            return OAuth.authorizeUrl(authorizeEp, clientId, redirect, OAuth.challenge(verifier), state)
+        } catch (e: Exception) {
+            return fail("Couldn't connect: ${e.message ?: "couldn't reach the server"}")
+        }
+    }
+
+    /**
+     * Step 2: the browser redirected back to `<appId>:/oauth?code=…&state=…`.
+     * Exchanges the code for the access token, then finishes exactly as a
+     * password sign-in does. Blocking; runs off the main thread.
+     */
+    fun completeOAuth(redirectUri: String) {
+        val p = prefs ?: return
+        val pending = OAuthPending.fromJson(p.oauthPending)
+        val r = OAuth.parseRedirect(redirectUri, p.appId)
+        fun fail(msg: String) {
+            post { authError = msg; authBusy = false; oauthWaiting = false; status = null }
+        }
+        if (r == null) return
+        if (pending == null) return fail("That sign-in link is stale — tap Sign in with browser again.")
+        if (r.state != pending.state) {
+            // Not a reply to OUR request: ignore it rather than spend the code.
+            return fail("That sign-in reply didn't match this app's request. Try again.")
+        }
+        p.oauthPending = null
+        if (r.error != null) {
+            return fail(
+                if (r.error == "access_denied") "You declined the sign-in in the browser."
+                else "The server refused the sign-in: ${r.error}",
+            )
+        }
+        val code = r.code ?: return fail("The browser came back without a sign-in code. Try again.")
+        post { authBusy = true; oauthWaiting = false; authError = null; status = "Signing in…" }
+        try {
+            val form = FormBody.Builder()
+                .add("grant_type", "authorization_code")
+                .add("client_id", pending.clientId)
+                .add("code", code)
+                .add("redirect_uri", pending.redirectUri)
+                .add("code_verifier", pending.verifier)
+                .build()
+            var tok = ""
+            http.newCall(Request.Builder().url(pending.tokenEndpoint).post(form).build()).execute().use { res ->
+                val text = res.body?.string().orEmpty()
+                val err = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                if (res.code == 401 || err == "invalid_client") {
+                    // Rejects OUR client_id, not the member (OAUTH.md): the
+                    // registration lapsed. Forget it so the next attempt re-registers.
+                    p.setOauthClientId(pending.base, null)
+                    return fail("This app's registration with the server lapsed. Tap Sign in with browser to try again.")
+                }
+                if (!res.isSuccessful) {
+                    return fail(
+                        if (err == "invalid_grant") "That sign-in code was rejected (expired or already used). Try again."
+                        else "Sign-in failed (server said HTTP ${res.code}).",
+                    )
+                }
+                tok = runCatching { JSONObject(text).optString("access_token") }.getOrNull().orEmpty()
+                if (tok.isEmpty()) return fail("The server didn't return an access token. Try again.")
+            }
+            baseUrl = pending.base
+            token = tok
+            // The member never typed a name here; ask the server for it so the
+            // login screen can prefill it next time, like the password path does.
+            val username = getJson("$baseUrl/api/auth/me")
+                ?.optJSONObject("user")?.optString("username").orEmpty()
+                .ifEmpty { p.username.orEmpty() }
+            p.saveSession(baseUrl, username, tok)
+            fetchNetworkNames()
+            post {
+                status = "Connecting…"
+                authBusy = false
+                loggedIn = true
+            }
+            openSocket(null)
+            loadSettings()
+        } catch (e: Exception) {
+            fail("Couldn't connect: ${e.message ?: "couldn't reach the server"}")
+        }
+    }
+
+    /** The user gave up waiting for the browser. Also forgets the server's
+     *  client_id: the one failure the app can't see is the approval page
+     *  rejecting a lapsed registration, and a retry must not repeat it. */
+    fun cancelOAuth(reason: String? = null) {
+        val p = prefs
+        OAuthPending.fromJson(p?.oauthPending)?.let { p?.setOauthClientId(it.base, null) }
+        p?.oauthPending = null
+        post { oauthWaiting = false; authBusy = false; authError = reason; status = null }
+    }
+
+    /** GET a JSON object, with the session bearer when we have one. Null on any
+     *  non-2xx, network failure, or a body that isn't a JSON object. */
+    private fun getJson(url: String): JSONObject? = try {
+        val b = Request.Builder().url(url)
+        token?.let { b.header("Authorization", "Bearer $it") }
+        http.newCall(b.build()).execute().use { res ->
+            if (!res.isSuccessful) null
+            else runCatching { JSONObject(res.body?.string().orEmpty()) }.getOrNull()
+        }
+    } catch (_: Exception) {
+        null
     }
 
     private fun revokeSession() {
